@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Harness OAuth popup (#560)</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        background: #0a0a0b;
+        color: #e6e6e6;
+      }
+      main { width: min(560px, 90vw); padding: 24px; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p.sub { color: #9a9a9a; margin: 0 0 20px; }
+      button {
+        appearance: none;
+        border: 1px solid #2a2a2c;
+        background: #161617;
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 8px;
+        cursor: pointer;
+        font: inherit;
+      }
+      button:hover { background: #1f1f21; }
+      #log {
+        margin-top: 20px;
+        padding: 12px 14px;
+        border: 1px solid #2a2a2c;
+        border-radius: 8px;
+        background: #111;
+        white-space: pre-wrap;
+        min-height: 64px;
+      }
+      .ok { color: #4ade80; }
+      .err { color: #f87171; }
+      .popup-only { text-align: center; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Prova MANUAL (#560) do canal opener↔popup no navegador embutido, SEM rede/provider real.
+      Como usar: abrir este arquivo no navegador embutido da gaveta e clicar "Abrir popup de login".
+        Esperado (FIX OK):
+          1. uma JANELA DO SO abre (não uma aba) com este mesmo arquivo em modo #popup;
+          2. o popup faz opener.postMessage('oauth-ok') e window.close();
+          3. esta página recebe a mensagem (log verde) E detecta popup.closed (poll);
+          4. ao fechar, o foco volta para esta aba.
+        Esperado (SEM o fix / regressão): window.open devolve null OU abre uma ABA sem window.opener →
+          nem a mensagem nem o popup.closed chegam → log de ERRO.
+      O modo é decidido pelo hash da URL: sem hash = OPENER; #popup = POPUP.
+    -->
+    <main>
+      <div id="opener-ui">
+        <h1>Harness OAuth popup — #560</h1>
+        <p class="sub">Prova local do canal <code>window.opener</code> / <code>postMessage</code> / <code>popup.closed</code> (sem rede).</p>
+        <button id="open">Abrir popup de login</button>
+        <div id="log">Aguardando…</div>
+      </div>
+      <div id="popup-ui" class="popup-only" hidden>
+        <h1>Popup de "login"</h1>
+        <p class="sub">Enviando resultado ao opener e fechando…</p>
+      </div>
+    </main>
+
+    <script>
+      const isPopup = location.hash === '#popup'
+      const $ = (id) => document.getElementById(id)
+
+      if (isPopup) {
+        // ---- modo POPUP: simula o provider devolvendo o resultado ao opener e fechando-se ----
+        $('opener-ui').hidden = true
+        $('popup-ui').hidden = false
+        try {
+          if (window.opener) window.opener.postMessage('oauth-ok', '*')
+        } catch (e) {
+          /* opener cross-origin não bloqueia '*'; aqui mesma origem */
+        }
+        // pequeno atraso só p/ a janela ser visível antes de fechar
+        setTimeout(() => window.close(), 600)
+      } else {
+        // ---- modo OPENER: abre o popup e prova os dois canais (postMessage + poll de .closed) ----
+        const log = $('log')
+        const say = (msg, cls) => {
+          const line = document.createElement('div')
+          if (cls) line.className = cls
+          line.textContent = msg
+          log.appendChild(line)
+        }
+        let gotMessage = false
+        let gotClosed = false
+
+        window.addEventListener('message', (ev) => {
+          if (ev.data === 'oauth-ok') {
+            gotMessage = true
+            say('✓ postMessage do popup CHEGOU ao opener', 'ok')
+          }
+        })
+
+        $('open').addEventListener('click', () => {
+          log.textContent = ''
+          const popup = window.open(location.href.split('#')[0] + '#popup', 'oauth_login', 'width=420,height=560')
+          if (!popup) {
+            say('✗ window.open devolveu null → popup virou aba SEM opener (regressão)', 'err')
+            return
+          }
+          say('Janela aberta. Aguardando postMessage + fechamento…')
+          const t = setInterval(() => {
+            if (popup.closed) {
+              clearInterval(t)
+              gotClosed = true
+              say('✓ poll detectou popup.closed', 'ok')
+              say(
+                gotMessage ? '✅ SUCESSO: canal opener↔popup íntegro' : '✗ fechou mas a mensagem NÃO chegou',
+                gotMessage ? 'ok' : 'err',
+              )
+            }
+          }, 250)
+        })
+      }
+    </script>
+  </body>
+</html>

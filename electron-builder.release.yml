@@ -1,0 +1,9 @@
+extends: electron-builder.yml
+mac:
+  identity: ''
+  forceCodeSigning: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.release.plist
+  entitlementsInherit: build/entitlements.mac.release.inherit.plist
+  notarize: true

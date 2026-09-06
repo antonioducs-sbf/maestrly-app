@@ -1,0 +1,11 @@
+extends: electron-builder.release.yml
+appId: io.github.antonioducs.maestrly.beta
+productName: Maestrly App Beta
+mac:
+  icon: resources/icon-beta.icns
+win:
+  icon: resources/icon-beta.ico
+linux:
+  executableName: maestrly-app-beta
+  icon: resources/icons-beta
+publish: null

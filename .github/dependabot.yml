@@ -1,0 +1,26 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Runtime packages are coupled to registries, integrity data, and protocol tests.
+      - dependency-name: "@openai/codex"
+      - dependency-name: "@github/copilot"
+      - dependency-name: "@github/copilot-sdk"
+      - dependency-name: "@anthropic-ai/claude-agent-sdk"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]

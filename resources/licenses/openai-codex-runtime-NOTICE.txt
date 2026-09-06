@@ -1,0 +1,27 @@
+OPENAI CODEX RUNTIME NOTICE
+
+Maestrly can download an unmodified, platform-specific native runtime from:
+
+  Package: @openai/codex
+  Version: 0.153.2
+  Repository: https://github.com/openai/codex
+  Copyright 2025 OpenAI
+  License: Apache License 2.0
+
+The runtime is not included in the lean Maestrly package. When the user enables
+the integration, Maestrly downloads the matching runtime directly from npm and
+preserves its original vendor directory so the Codex executable can access its
+companion binaries and resources.
+
+The complete Apache License 2.0 text and the attribution for OpenAI Codex are
+distributed alongside this notice as openai-codex-runtime-apache-2.0.txt.
+
+The upstream OpenAI Codex NOTICE is reproduced below:
+
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This project includes code derived from Ratatui
+(https://github.com/ratatui/ratatui), licensed under the MIT license.
+Copyright (c) 2016-2022 Florian Dehau
+Copyright (c) 2023-2025 The Ratatui Developers

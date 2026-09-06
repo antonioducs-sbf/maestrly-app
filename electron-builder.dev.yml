@@ -1,0 +1,11 @@
+extends: electron-builder.yml
+appId: io.github.antonioducs.maestrly.dev
+productName: Maestrly App Dev
+mac:
+  icon: resources/icon-dev.icns
+win:
+  icon: resources/icon-dev.ico
+linux:
+  icon: resources/icons-dev
+  executableName: maestrly-app-dev
+publish: null

@@ -1,0 +1,22 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Non-secret idempotency fixtures in bridge/router tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^test/unit/chat-chatgpt-web-(?:bridge|router)\.test\.ts$''']
+regexTarget = "line"
+regexes = ['''(?:idempotency_key|idempotencyKey)\s*:\s*['"][a-z0-9][a-z0-9-]*['"]''']
+
+[[allowlists]]
+description = "Exact vendor-owned public OAuth client identifier for a secretless desktop flow"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^src/main/chat/grok-subscription/oauth\.ts$''',
+]
+regexTarget = "line"
+regexes = [
+  '''DEFAULT_XAI_OAUTH_CLIENT_ID\s*=\s*['"]b1a00492-073a-47ea-816f-4c329264a828['"]''',
+]

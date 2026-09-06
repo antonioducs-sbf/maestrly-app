@@ -1,0 +1,61 @@
+name: Package smoke
+
+on:
+  schedule:
+    - cron: "17 8 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux package
+            os: ubuntu-24.04
+            package-script: package:linux
+          - label: macOS package
+            os: macos-15
+            package-script: package
+          - label: Windows package
+            os: windows-2025
+            package-script: package:win
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Electron system libraries
+        if: runner.os == 'Linux'
+        run: npx playwright install-deps chromium
+      - name: Build and verify native package
+        run: npm run ${{ matrix.package-script }}
+      - name: Smoke packaged desktop on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run smoke:packaged-desktop
+      - name: Smoke packaged Local ML on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run smoke:packaged-local-ml-runtime
+      - name: Smoke packaged desktop
+        if: runner.os != 'Linux'
+        run: npm run smoke:packaged-desktop
+      - name: Smoke packaged Local ML
+        if: runner.os != 'Linux'
+        run: npm run smoke:packaged-local-ml-runtime

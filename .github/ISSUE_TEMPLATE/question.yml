@@ -1,0 +1,32 @@
+name: Question or design discussion
+description: Ask for setup help or discuss an idea before proposing a large change
+title: "question: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private conversations, repository content, identifying paths, or raw logs.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or design topic
+      description: Explain what you are trying to understand or decide.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and prior investigation
+      description: Include relevant version, platform, documentation, alternatives, and sanitized evidence.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed credentials, personal data, private content, and identifying paths.
+          required: true

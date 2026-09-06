@@ -1,0 +1,14 @@
+extends: electron-builder.yml
+appId: io.github.antonioducs.maestrly.beta
+productName: Maestrly App Beta
+mac:
+  icon: resources/icon-beta.icns
+  identity: '-'
+  extendInfo:
+    NSMicrophoneUsageDescription: Maestrly App uses the microphone for voice dictation processed locally on your computer.
+win:
+  icon: resources/icon-beta.ico
+linux:
+  icon: resources/icons-beta
+  executableName: maestrly-app-beta
+publish: null

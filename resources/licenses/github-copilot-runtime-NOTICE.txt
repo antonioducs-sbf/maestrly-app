@@ -1,0 +1,18 @@
+GitHub Copilot runtime supported by Maestrly
+
+Components:
+- @github/copilot-sdk 1.0.7
+  Source: https://github.com/github/copilot-sdk/tree/v1.0.7
+  License: MIT (see github-copilot-sdk-MIT.txt)
+- @github/copilot CLI 1.0.71 platform package
+  Source: https://github.com/github/copilot-cli/tree/v1.0.71
+  License: GitHub Copilot CLI License (see github-copilot-cli-license.txt)
+
+The CLI runtime is not included in the lean Maestrly package. When the user
+enables it, Maestrly downloads the complete official target-specific npm package
+directly from npm. Its LICENSE.md is a required installation file, and Maestrly
+does not alter the runtime's code or assets.
+
+Use of GitHub Copilot services remains subject to the applicable GitHub Terms
+of Service and GitHub Copilot terms. Maestrly is independently licensed and is
+not affiliated with or endorsed by GitHub.

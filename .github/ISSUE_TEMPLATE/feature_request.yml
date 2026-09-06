@@ -1,0 +1,59 @@
+name: Feature request
+description: Describe a concrete problem Maestrly App could solve
+title: "feat: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing Issues and Discussions first. Large provider, storage, architecture, privacy, or security changes should begin in Discussions.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: Explain who is blocked, what they are trying to do, and why the current behavior is insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible workflow and its boundaries, not only an implementation choice.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds and simpler options.
+
+  - type: textarea
+    id: local-offline
+    attributes:
+      label: Local and offline behavior
+      description: State what data is stored, whether the feature works offline, and how export/reset should treat it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: network-data
+    attributes:
+      label: Network, credentials, and data impact
+      description: Name every external destination, credential owner, permission, and data category involved. Write "None" when the feature is entirely local.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Platform scope
+      options:
+        - All desktop platforms
+        - macOS only
+        - Linux only
+        - Windows only
+        - Platform support is unknown
+    validations:
+      required: true

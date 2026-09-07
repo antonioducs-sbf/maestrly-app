@@ -44,4 +44,19 @@ describe('OpenAI Astra prompt profile', () => {
     })
     expect(prompt.instructions).not.toContain('ULTRA MODE')
   })
+
+  it('layers the versioned Design harness exactly once over Astra', () => {
+    const prompt = compileOpenAIAstraPrompt({
+      cwd: '/workspace',
+      mode: 'design',
+      appToolsEnabled: true,
+      hasNotesTab: true,
+      nativeTools: { localShell: true, applyPatch: true },
+    })
+
+    expect(prompt.instructions.match(/# Maestrly Design mode — design-v1/g)).toHaveLength(1)
+    expect(prompt.instructions).toContain('Design mode: build a navigable visual prototype')
+    expect(prompt.instructions).toContain('executable, interactive visual prototype')
+    expect(prompt.instructions).not.toContain('Plan mode: investigate')
+  })
 })

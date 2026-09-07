@@ -1,4 +1,5 @@
 import { MEMORY_TOOL_GUIDANCE } from '../memory-tool-guidance'
+import { renderDesignModePrompt } from '../design-mode-prompt'
 import type { CompileOpenAIPromptInput, OpenAIPromptMode } from './prompt'
 
 export const OPENAI_GPT6_ASTRA_PROMPT_PROFILE = {
@@ -23,6 +24,8 @@ Verify in proportion to risk. Run focused checks for changed behavior and broade
 const MODE_INSTRUCTIONS: Record<OpenAIPromptMode, string> = {
   agent:
     'Agent mode: carry authorized work through implementation and verification. Write only within the active permission and sandbox policy.',
+  design:
+    'Design mode: build a navigable visual prototype with Agent-equivalent capabilities under the active permission and sandbox policy.',
   plan:
     'Plan mode: investigate and prepare a reviewable implementation plan. Do not implement the planned code before the host starts a later approved turn.',
   ask: 'Ask mode: answer, explain, review, or diagnose. Read-only investigation is allowed; do not mutate the project unless the user explicitly changes the task.',
@@ -51,9 +54,11 @@ export interface CompiledAstraPrompt {
 
 /** Stable host prefix plus volatile environment suffix; the native Astra prompt remains owned by the runtime. */
 export function compileOpenAIAstraPrompt(input: CompileOpenAIPromptInput): CompiledAstraPrompt {
+  const designPrompt = renderDesignModePrompt(input.mode)
   const stablePrefix = [
     ASTRA_BASE_INSTRUCTIONS,
     `\n\n# Active mode\n\n${MODE_INSTRUCTIONS[input.mode]}`,
+    designPrompt ? `\n\n${designPrompt}` : '',
     toolPolicy(input),
     optionalSection('Project and workspace instructions', input.projectContext),
     optionalSection('Memory Center', MEMORY_TOOL_GUIDANCE),

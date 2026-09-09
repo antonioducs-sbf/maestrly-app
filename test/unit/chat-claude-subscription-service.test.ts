@@ -124,6 +124,10 @@ vi.mock('../../src/main/chat/claude-agent-sdk', () => ({
   retryManagedClaudeSessionCleanup: h.retryCleanup,
   runClaudeChat: h.runClaude,
 }))
+vi.mock('../../src/main/chat/claude-agent-sdk/manager', () => ({
+  getClaudeSubscriptionManager: () => h.manager,
+  listClaudeSubscriptionManagers: () => [h.manager],
+}))
 vi.mock('../../src/main/chat/codex-subscription', () => ({
   deleteAllManagedCodexThreads: vi.fn(async () => {}),
   deleteCodexThreadForConversation: vi.fn(async () => {}),
@@ -358,6 +362,7 @@ describe('Claude subscription service integration', () => {
         handlers.get('chat:send')?.({ sender: h.webContents }, { conversationId: conversation.id, text })
       ).resolves.toEqual({ ok: true })
       await vi.waitFor(() => expect(h.runClaude).toHaveBeenCalledTimes(calls))
+      await new Promise<void>((resolve) => setImmediate(resolve))
     }
     const claudeCalls = h.runClaude.mock.calls as unknown as Array<
       [{ behaviorProfile?: unknown; resolvedModelId?: string }]
@@ -459,7 +464,9 @@ describe('Claude subscription service integration', () => {
     })
 
     expect(h.compactSession).not.toHaveBeenCalled()
-    expect(h.summarizePortable).toHaveBeenCalledWith(expect.objectContaining({ modelId: 'sonnet', cwd: '/repo' }))
+    expect(h.summarizePortable).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: 'claude-sonnet-5', cwd: '/repo' })
+    )
     expect(h.deleteOne).toHaveBeenCalledWith(conversation.id)
     expect(listChatMessages(conversation.id).at(-1)?.parts).toEqual([
       expect.objectContaining({ type: 'compaction', text: 'portable Claude summary', strategy: 'summary' }),

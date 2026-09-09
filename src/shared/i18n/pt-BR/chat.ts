@@ -333,6 +333,8 @@ export default {
     claudeAuthenticationRequired: 'Sua conexão com o Claude expirou. Entre novamente para continuar.',
     manageClaudeConnection: 'Gerenciar conexão Claude',
     accountsExhaustedError: 'Todas as contas Codex da lista de rotação esgotaram o uso. Tente de novo mais tarde.',
+    claudeAccountsExhaustedError:
+      'Todas as contas Claude da lista de rotação esgotaram o uso. Tente de novo mais tarde.',
     skillFolder: 'Skill carregada de {{dir}}',
   },
   skillsMenu: {
@@ -766,6 +768,8 @@ export default {
     removeFallback: 'Remover fallback',
     fallbackDisconnectedWarning: 'Desconectada — ignorada até reconectar.',
     accountsExhaustedError: 'Todas as contas Codex da lista de rotação esgotaram o uso. Tente de novo mais tarde.',
+    claudeAccountsExhaustedError:
+      'Todas as contas Claude da lista de rotação esgotaram o uso. Tente de novo mais tarde.',
     failoverSwitchStatus: 'Trocou de {{from}} para {{to}} por limite de uso',
     apiKeyOptionalPlaceholder: 'Chave de API (opcional agora)',
     cancel: 'Cancelar',

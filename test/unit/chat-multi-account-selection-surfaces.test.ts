@@ -19,6 +19,17 @@ describe('multi-account selection surfaces', () => {
     expect(candidate).toContain('.chatSubagentProfilesModelCatalog(candidate.providerId)')
   })
 
+  it('shares family-aware rotation messages across admission and persisted errors', () => {
+    for (const file of ['ChatView.tsx', 'ChatMessageList.tsx']) {
+      expect(source(`src/renderer/components/chat/${file}`)).toContain('subscriptionExhaustionMessageKey')
+    }
+    const settings = source('src/renderer/components/chat/ApiKeySettings.tsx')
+    expect(settings).toContain('subscriptionFailover.supportedKinds')
+    expect(settings).toContain('showSubscriptionFailover')
+    expect(settings).not.toContain('showCodexFailover')
+    expect(source('src/renderer/components/chat/ChatView.tsx')).toContain('labelForSubscriptionProvider')
+  })
+
   it('keeps configurator and quick usage identities account-scoped', () => {
     const configurator = source('src/renderer/components/chat/MaestroConfigurator.tsx')
     const usage = source('src/renderer/components/chat/quick-subscription-usage.ts')

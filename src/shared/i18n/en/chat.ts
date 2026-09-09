@@ -327,6 +327,7 @@ export default {
     claudeAuthenticationRequired: 'Your Claude connection expired. Sign in again to continue.',
     manageClaudeConnection: 'Manage Claude connection',
     accountsExhaustedError: 'All Codex accounts in the rotation list are out of usage. Try again later.',
+    claudeAccountsExhaustedError: 'All Claude accounts in the rotation list are out of usage. Try again later.',
     skillFolder: 'Skill loaded from {{dir}}',
   },
   skillsMenu: {
@@ -757,6 +758,7 @@ export default {
     removeFallback: 'Remove fallback',
     fallbackDisconnectedWarning: 'Disconnected — skipped until you reconnect.',
     accountsExhaustedError: 'All Codex accounts in the rotation list are out of usage. Try again later.',
+    claudeAccountsExhaustedError: 'All Claude accounts in the rotation list are out of usage. Try again later.',
     failoverSwitchStatus: 'Switched from {{from}} to {{to}} due to usage limit',
     apiKeyOptionalPlaceholder: 'API key (optional for now)',
     cancel: 'Cancel',

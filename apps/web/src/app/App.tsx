@@ -1,3 +1,4 @@
+import { AccountDialog } from '../features/auth/AccountDialog.js'
 import { PersonalDevicesPanel } from '../features/devices/PersonalDevicesPanel.js'
 import { TeamPanel } from '../features/team/TeamPanel.js'
 import { RepositoriesPanel } from '../features/repositories/RepositoriesPanel.js'
@@ -6,7 +7,7 @@ import { t, useLocale, LanguageSelector } from '../i18n/index.js'
 import { FormDialog } from '../components/FormDialog.js'
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeftClose, PanelLeftOpen, FolderKanban, Languages, Cpu, Monitor } from 'lucide-react'
+import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeftClose, PanelLeftOpen, FolderKanban, Languages, Cpu, Monitor, UserRound } from 'lucide-react'
 import type { Project, Board } from '@maestrly/protocol'
 import { api, write } from './api.js'
 import { Login } from '../features/auth/Login.js'
@@ -274,6 +275,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
     }
   }, [organizationId, projectId])
 
+  const [accountOpen,setAccountOpen]=useState(false),[passwordChanged,setPasswordChanged]=useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
   async function createProject(data: FormData) {
     const name = String(data.get('name') ?? '').trim()
@@ -300,6 +302,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
   const readOnly = activeProject?.currentRole === 'viewer' && !canManage
   return (
     <div className={'workspace-shell '+(collapsed?'sidebar-collapsed':'sidebar-expanded')+(smallScreen&&mobileOpen?' sidebar-mobile-open':'')}>
+      {accountOpen?<AccountDialog user={session.user} onClose={()=>setAccountOpen(false)} onChanged={()=>setPasswordChanged(true)}/>:null}
       {creatingProject ? (
         <FormDialog
           title={t('Create project')}
@@ -378,12 +381,14 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           >
             {theme === 'light' ? <Moon /> : <Sun />}
           </button>
+          <button onClick={()=>{setPasswordChanged(false);setAccountOpen(true)}} aria-label={t('My account')} data-sidebar-tooltip={collapsed?t('My account'):undefined}><UserRound/><span>{t('My account')}</span></button>
           <button onClick={() => void signOut()} aria-label={t('Sign out')} data-sidebar-tooltip={collapsed?t('Sign out'):undefined}>
             <LogOut />
           </button>
         </div>
       </aside>
       <main className="workspace-main">
+        {passwordChanged?<p className="form-note account-notice" role="status">{t('Password changed successfully.')}</p>:null}
         <header className="topbar">
           <div>
             <p className="eyebrow">

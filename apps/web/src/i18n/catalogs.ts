@@ -637,7 +637,18 @@ export const en = {
   "Personal device unavailable or owned by another user.": "Personal device unavailable or owned by another user.",
   "This device does not support the configured model, repository or execution options.": "This device does not support the configured model, repository or execution options.",
   "Personal execution requires an explicit human request.": "Personal execution requires an explicit human request.",
-  "Instance URL": "Instance URL"
+  "Instance URL": "Instance URL",
+  "My account": "My account",
+  "Change password": "Change password",
+  "Current password": "Current password",
+  "New password": "New password",
+  "Confirm new password": "Confirm new password",
+  "The new passwords do not match.": "The new passwords do not match.",
+  "Use between 12 and 128 characters for the new password.": "Use between 12 and 128 characters for the new password.",
+  "Password changed successfully.": "Password changed successfully.",
+  "Invalid password": "Invalid password",
+  "Password too short": "Password too short",
+  "Password too long": "Password too long"
 } as const
 export const ptBR: Record<keyof typeof en, string> = {
   "Work moves forward. You stay in control.": "O trabalho avança. Você mantém o controle.",
@@ -1278,5 +1289,16 @@ export const ptBR: Record<keyof typeof en, string> = {
   "Personal device unavailable or owned by another user.": "Dispositivo pessoal indisponível ou pertencente a outro usuário.",
   "This device does not support the configured model, repository or execution options.": "Este dispositivo não oferece suporte ao modelo, repositório ou opções de execução configurados.",
   "Personal execution requires an explicit human request.": "A execução pessoal exige uma solicitação humana explícita.",
-  "Instance URL": "URL da instância"
+  "Instance URL": "URL da instância",
+  "My account": "Minha conta",
+  "Change password": "Alterar senha",
+  "Current password": "Senha atual",
+  "New password": "Nova senha",
+  "Confirm new password": "Confirmar nova senha",
+  "The new passwords do not match.": "As novas senhas não coincidem.",
+  "Use between 12 and 128 characters for the new password.": "Use entre 12 e 128 caracteres para a nova senha.",
+  "Password changed successfully.": "Senha alterada com sucesso.",
+  "Invalid password": "Senha atual incorreta.",
+  "Password too short": "A senha é muito curta.",
+  "Password too long": "A senha é muito longa."
 }

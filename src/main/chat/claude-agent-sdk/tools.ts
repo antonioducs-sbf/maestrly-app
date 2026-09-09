@@ -17,6 +17,7 @@ import {
   toolOutputToMcpCallResult,
 } from '../tool-output'
 import type { ToolOutput } from '../../../shared/chat'
+import type { ClaudeToolJournal } from './tool-journal'
 
 export const CLAUDE_MCP_SERVER_NAME = 'maestrly'
 export const CLAUDE_MCP_TOOL_PREFIX = `mcp__${CLAUDE_MCP_SERVER_NAME}__`
@@ -188,20 +189,28 @@ export async function buildClaudeToolBridge(
     'delegate',
     'use_skill',
   ]),
-  beforeExecute?: () => void
+  beforeExecute?: () => void,
+  journal?: ClaudeToolJournal
 ): Promise<ClaudeToolBridge> {
   const definitions: SdkMcpToolDefinition<any>[] = []
   const canonicalOutputs = new Map<string, ToolOutput>()
   const signatureRows: Array<{ name: string; description: string; schema: unknown; eager: boolean }> = []
   const verifiedIds = new Set<string>()
+  const verifiedKeys = new Map<string, string>()
   const verifiedByInput = new Map<string, string[]>()
   const waitingByInput = new Map<string, Array<(toolCallId: string) => void>>()
   const callKey = (name: string, input: unknown) => `${name}\0${inputHash(input)}`
   const announceVerifiedToolCall = (sdkName: string, toolCallId: string, input: unknown): void => {
-    if (!toolCallId || verifiedIds.has(toolCallId)) return
+    if (!toolCallId || (!journal && verifiedIds.has(toolCallId))) return
     verifiedIds.add(toolCallId)
     const name = stripQualifiedName(sdkName)
     const key = callKey(name, input)
+    if (journal) {
+      const prior = verifiedKeys.get(toolCallId)
+      if (prior && prior !== key) throw new Error(`Conflicting Claude tool call: ${toolCallId}`)
+      verifiedKeys.set(toolCallId, key)
+      if (verifiedByInput.get(key)?.includes(toolCallId)) return
+    }
     const waiter = waitingByInput.get(key)?.shift()
     if (waiter) {
       waiter(toolCallId)
@@ -269,42 +278,47 @@ export async function buildClaudeToolBridge(
         description,
         inputShape,
         async (input, extra) => {
-          signal.throwIfAborted()
-          beforeExecute?.()
-          let parsed: unknown = input
-          if ('input' in inputShape && Object.keys(inputShape).length === 1)
-            parsed = (input as { input: unknown }).input
-          if (schema.validate) {
-            const validation = await schema.validate(parsed)
-            if (!validation.success) throw validation.error
-            parsed = validation.value
-          }
-          // The in-process MCP callback does not carry an authoritative
-          // tool-use id. Only the host-owned PreToolUse hook may establish it.
-          const toolCallId = await claimToolCall(name, input)
-          signal.throwIfAborted()
-          const sdkSignal =
-            (extra as { signal?: unknown })?.signal instanceof AbortSignal
-              ? (extra as { signal: AbortSignal }).signal
-              : null
-          const executionSignal = sdkSignal ? AbortSignal.any([signal, sdkSignal]) : signal
-          executionSignal.throwIfAborted()
-          beforeExecute?.()
-          const output = await (aiTool.execute as (...args: any[]) => unknown)(parsed, {
-            toolCallId,
-            messages: [],
-            abortSignal: executionSignal,
-          })
-          const canonical = modelOutputToChatToolOutput(output)
-          canonicalOutputs.set(toolCallId, canonical)
-          const modelOutput = aiTool.toModelOutput
-            ? await (aiTool.toModelOutput as (options: Record<string, unknown>) => unknown)({
+          const callback = async () => {
+            signal.throwIfAborted()
+            beforeExecute?.()
+            let parsed: unknown = input
+            if ('input' in inputShape && Object.keys(inputShape).length === 1)
+              parsed = (input as { input: unknown }).input
+            if (schema.validate) {
+              const validation = await schema.validate(parsed)
+              if (!validation.success) throw validation.error
+              parsed = validation.value
+            }
+            // The in-process MCP callback does not carry an authoritative
+            // tool-use id. Only the host-owned PreToolUse hook may establish it.
+            const toolCallId = await claimToolCall(name, input)
+            signal.throwIfAborted()
+            const sdkSignal =
+              (extra as { signal?: unknown })?.signal instanceof AbortSignal
+                ? (extra as { signal: AbortSignal }).signal
+                : null
+            const executionSignal = !journal && sdkSignal ? AbortSignal.any([signal, sdkSignal]) : signal
+            executionSignal.throwIfAborted()
+            beforeExecute?.()
+            const execute = async () =>
+              (aiTool.execute as (...args: any[]) => unknown)(parsed, {
                 toolCallId,
-                input: parsed,
-                output,
+                messages: [],
+                abortSignal: executionSignal,
               })
-            : output
-          return callToolResult(stripToolOutputMetadata(modelOutput), toolOutputIsError(canonical))
+            const output = journal ? await journal.run(toolCallId, name, parsed, execute) : await execute()
+            const canonical = modelOutputToChatToolOutput(output)
+            canonicalOutputs.set(toolCallId, canonical)
+            const modelOutput = aiTool.toModelOutput
+              ? await (aiTool.toModelOutput as (options: Record<string, unknown>) => unknown)({
+                  toolCallId,
+                  input: parsed,
+                  output,
+                })
+              : output
+            return callToolResult(stripToolOutputMetadata(modelOutput), toolOutputIsError(canonical))
+          }
+          return journal ? journal.track(callback) : callback()
         },
         { alwaysLoad: eager }
       )

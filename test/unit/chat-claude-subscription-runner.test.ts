@@ -6,6 +6,7 @@ import type { ChatBehavior } from '../../src/shared/conversation-experience'
 
 const h = vi.hoisted(() => ({
   stagePlan: vi.fn(),
+  claudeManagers: new Map<string, unknown>(),
   listAgents: vi.fn(),
   resolveSubagentExecutionProfile: vi.fn(),
   runClaudeSubagent: vi.fn(),
@@ -40,6 +41,14 @@ vi.mock('../../src/main/chat/subagent-execution-profile', () => ({
 vi.mock('../../src/main/chat/claude-agent-sdk/subagent-runner', () => ({
   runClaudeSubagent: h.runClaudeSubagent,
 }))
+vi.mock('../../src/main/chat/claude-agent-sdk/manager', async (original) => {
+  const actual = await original<typeof import('../../src/main/chat/claude-agent-sdk/manager')>()
+  return {
+    ...actual,
+    getClaudeSubscriptionManager: (accountId: string | null = null) =>
+      h.claudeManagers.get(accountId ?? '') ?? actual.getClaudeSubscriptionManager(accountId),
+  }
+})
 vi.mock('../../src/main/chat/codex-subscription/manager', () => ({
   getCodexSubscriptionManager: () => ({
     getClient: h.getCodexClient,
@@ -76,7 +85,11 @@ vi.mock('../../src/main/chat/usage-diagnostics', () => ({
   recordModelCallUsage: vi.fn(),
 }))
 
-import { compactClaudeSession, runClaudeChat } from '../../src/main/chat/claude-agent-sdk/runner'
+import {
+  compactClaudeSession,
+  runClaudeChat,
+  type RunClaudeChatArgs,
+} from '../../src/main/chat/claude-agent-sdk/runner'
 import type {
   ClaudeSubscriptionAccountIdentity,
   ClaudeSubscriptionManager,
@@ -95,6 +108,7 @@ import {
 import { closeDb, freshDb } from '../helpers/db'
 import { makeConversation, makeWorkspace } from '../helpers/factories'
 import { REVIEWER_READONLY_TOOL_NAMES } from '../../src/main/chat/tools'
+import type { ClaudeRuntimeTarget } from '../../src/main/chat/subscription-failover/claude-adapter'
 import { FABLE_51_BEHAVIOR_PROFILE } from '../../src/main/chat/fable/profile'
 
 const identity: ClaudeSubscriptionAccountIdentity = {
@@ -1659,7 +1673,10 @@ describe('Claude official chat runner', () => {
     })
     expect(events.some((event) => event.kind === 'error')).toBe(false)
     expect(events.some((event) => event.kind === 'finish')).toBe(true)
-    expect(onModelContextWindow).toHaveBeenCalledWith(200_000)
+    expect(onModelContextWindow).toHaveBeenCalledWith(
+      200_000,
+      expect.objectContaining({ providerId: 'builtin_claude_subscription' })
+    )
     expect(manager.query?.lifecycle).toEqual(['context', 'interrupt'])
     expect(getClaudeSessionBinding(conversation.id)).toMatchObject({
       sessionId: 'claude-session-1',
@@ -2911,5 +2928,614 @@ describe('Claude official chat runner', () => {
     expect(assistants).toHaveLength(1)
     expect(assistants[0]?.parts.some((p) => p.type === 'text' && p.text.includes('Hello!'))).toBe(true)
     expect(assistants[0]?.usage).toMatchObject({ input: expect.any(Number), output: expect.any(Number) })
+  })
+})
+
+// Transport fixtures deliberately omit the tool_result ACK after the host side effect.
+describe('Claude account rotation', () => {
+  beforeEach(() => {
+    freshDb()
+    h.runClaudeSubagent.mockReset()
+    h.resolveSubagentExecutionProfile.mockReset()
+    h.listAgents.mockResolvedValue([])
+    h.buildMcpTools.mockReset()
+    h.buildMcpTools.mockResolvedValue({ tools: {}, close: vi.fn(async () => {}) })
+    h.buildAppTools.mockResolvedValue({ tools: {}, close: vi.fn(async () => {}) })
+  })
+  afterEach(() => {
+    h.claudeManagers.clear()
+    closeDb()
+  })
+
+  function rotationManager(accountId: string, stream: (options: any) => AsyncGenerator<SDKMessage>) {
+    const received: string[] = []
+    const manager = {
+      accountId,
+      getStatusSnapshot: () => ({ authenticated: true, accountFingerprint: accountId, accountEpoch: 1 }),
+      assertAccountIdentity: vi.fn(),
+      assertSubscriptionRuntimeAccount: vi.fn(),
+      deleteManagedSession: vi.fn(async () => {}),
+      createQuery: vi.fn((input: { prompt: AsyncIterable<unknown>; options?: unknown }) => ({
+        close: vi.fn(),
+        interrupt: vi.fn(async () => {}),
+        initializationResult: vi.fn(async () => ({ account: { apiProvider: 'firstParty' } })),
+        getContextUsage: vi.fn(async () => ({ totalTokens: 200, maxTokens: 200_000, model: 'claude-sonnet' })),
+        async *[Symbol.asyncIterator]() {
+          const prompt = await input.prompt[Symbol.asyncIterator]().next()
+          received.push(JSON.stringify(prompt.value))
+          yield* stream(input.options)
+        },
+      })),
+    }
+    h.claudeManagers.set(accountId, manager)
+    return { manager, received }
+  }
+
+  async function setupRotation(streamA: (options: any) => AsyncGenerator<SDKMessage>) {
+    const { getSubscriptionFailoverRouter } = await import('../../src/main/chat/subscription-failover/router')
+    const { tool, jsonSchema } = await import('ai')
+    const router = getSubscriptionFailoverRouter()
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, { cwd: '/repo' })
+    upsertChatMessage({
+      id: 'rotation-user',
+      conversationId: conversation.id,
+      role: 'user',
+      parts: [{ type: 'text', id: 'rotation-prompt', text: 'Finish the existing work.' }],
+      createdAt: 1,
+    })
+    const effect = vi.fn(async () => 'effect-recorded')
+    h.buildMcpTools.mockResolvedValue({
+      tools: {
+        record_effect: tool({
+          description: 'Record a test effect',
+          inputSchema: jsonSchema({ type: 'object', properties: {} }),
+          execute: effect,
+        }),
+      },
+      close: vi.fn(async () => {}),
+    } as never)
+    const a = rotationManager('acc_rotation_a', streamA)
+    const b = rotationManager('acc_rotation_b', async function* () {
+      yield {
+        ...finalAssistant('answer-b', [{ type: 'text', text: 'Finished on B.' }]),
+        session_id: 'session-b',
+      } as SDKMessage
+      yield resultMessage('session-b')
+    })
+    const target = (manager: typeof a.manager): ClaudeRuntimeTarget => ({
+      providerId: `builtin_claude_subscription@${manager.accountId}`,
+      accountId: manager.accountId,
+      manager: manager as unknown as ClaudeSubscriptionManager,
+      accountIdentity: { fingerprint: manager.accountId, epoch: 1 },
+      model: { value: 'sonnet', displayName: 'Sonnet', description: '', resolvedModel: 'claude-sonnet' },
+      runtimeModelId: 'claude-sonnet',
+      fastMode: false,
+      maestrlyUltra: false,
+      contextWindow: 200_000,
+    })
+    const targetA = target(a.manager)
+    const targetB = target(b.manager)
+    router.resetProvider(targetA.providerId)
+    router.resetProvider(targetB.providerId)
+    const events: ChatStreamEvent[] = []
+    const transitions = vi.fn()
+    const resolve = vi.fn<NonNullable<RunClaudeChatArgs['resolveNextTarget']>>(async () => ({
+      ok: true as const,
+      target: targetB,
+    }))
+    const controller = new AbortController()
+    const args = {
+      conversationId: conversation.id,
+      projectId: workspace.id,
+      cwd: '/repo',
+      selection: { providerId: targetA.providerId, modelId: 'sonnet' },
+      resolvedModelId: 'claude-sonnet',
+      mode: 'agent' as const,
+      permMode: 'ask' as const,
+      manager: targetA.manager,
+      accountIdentity: targetA.accountIdentity,
+      initialTarget: targetA,
+      failoverChain: [targetA.providerId, targetB.providerId],
+      resolveNextTarget: resolve,
+      onFailoverTransition: transitions,
+      broker: { assert: vi.fn(), on: vi.fn() } as never,
+      questionBroker: { ask: vi.fn() } as never,
+      emit: (event: ChatStreamEvent) => events.push(event),
+      signal: controller.signal,
+    }
+    return { args, a, b, events, transitions, resolve, controller, effect, conversation, targetA, targetB, router }
+  }
+
+  async function* quotaAfterTool(options: any): AsyncGenerator<SDKMessage> {
+    yield {
+      ...finalAssistant('answer-a', [
+        { type: 'text', text: 'Work started on A.' },
+        { type: 'tool_use', id: 'effect-call', name: 'mcp__maestrly__record_effect', input: {} },
+      ]),
+      session_id: 'session-a',
+    } as SDKMessage
+    const hook = options.hooks.PreToolUse[0].hooks[0]
+    await hook(
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'mcp__maestrly__record_effect',
+        tool_input: {},
+        tool_use_id: 'effect-call',
+      },
+      'effect-call',
+      { signal: new AbortController().signal }
+    )
+    await options.mcpServers.maestrly.instance._registeredTools.record_effect.handler({}, {})
+    yield errorResultMessage(['Usage limit reached'], 'session-a')
+    yield {
+      type: 'rate_limit_event',
+      uuid: '00000000-0000-4000-8000-000000000001',
+      session_id: 'session-a',
+      rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour' },
+    } as SDKMessage
+  }
+
+  it('continues the same bubble with a completed tool missing its SDK acknowledgment', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    await runClaudeChat(run.args)
+    expect(run.effect).toHaveBeenCalledTimes(1)
+    expect(run.b.received).toHaveLength(1)
+    expect(run.b.received[0]).toContain('effect-recorded')
+    expect(run.b.received[0]).toContain('Work started on A.')
+    expect(run.b.manager.createQuery.mock.calls[0][0].options).not.toHaveProperty('resume')
+    expect(run.events.filter((e) => e.kind === 'message-start')).toHaveLength(1)
+    expect(run.events.filter((e) => ['finish', 'error', 'aborted'].includes(e.kind))).toHaveLength(1)
+    expect(run.events.at(-1)?.kind).toBe('finish')
+    expect(run.transitions).toHaveBeenCalledTimes(1)
+    expect(run.router.getHealth(run.targetA.providerId).exhaustion?.generation).toBe(1)
+    expect(getClaudeSessionBinding(run.conversation.id)).toMatchObject({
+      sessionId: 'session-b',
+      accountId: run.targetB.accountId,
+    })
+    expect(run.a.manager.deleteManagedSession).toHaveBeenCalledWith('session-a', '/repo')
+    const assistant = listChatMessages(run.conversation.id).find((m) => m.role === 'assistant')!
+    expect(assistant.usage).toMatchObject({ input: 240, output: 16, runtimeEstimatedCostUsd: 0.0246 })
+  })
+
+  it('does not rotate generic transport failures', async () => {
+    const run = await setupRotation(async function* () {
+      yield errorResultMessage(['HTTP 429 request throttled'], 'session-a')
+    })
+    await runClaudeChat(run.args)
+    expect(run.resolve).not.toHaveBeenCalled()
+    expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+    expect(run.events.filter((e) => e.kind === 'error')).toHaveLength(1)
+  })
+
+  it('honors Stop while resolving the next account', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    run.resolve.mockImplementation(async () => {
+      run.controller.abort()
+      return { ok: true, target: run.targetB }
+    })
+    await runClaudeChat(run.args)
+    expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+    expect(run.events.filter((e) => e.kind === 'aborted')).toHaveLength(1)
+    expect(run.events.filter((e) => e.kind === 'error')).toHaveLength(0)
+  })
+
+  it.each(['quota-exhausted', 'unavailable'] as const)('emits one correctly typed terminal for %s', async (reason) => {
+    const run = await setupRotation(quotaAfterTool)
+    run.resolve.mockResolvedValue({ ok: false, error: 'no-eligible-account', reason, message: reason })
+    await runClaudeChat(run.args)
+    const failures = run.events.filter((event) => event.kind === 'error')
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({ message: reason })
+    if (reason === 'quota-exhausted') expect(failures[0]).toHaveProperty('code', 'claude-accounts-exhausted')
+    else expect(failures[0]).not.toHaveProperty('code')
+    expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+    const assistant = listChatMessages(run.conversation.id).find((message) => message.role === 'assistant')!
+    expect(assistant.usage).toMatchObject({ input: 120, output: 8, runtimeEstimatedCostUsd: 0.0123 })
+  })
+
+  it('releases a half-open target if Stop arrives at final admission', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    run.resolve.mockImplementation(async ({ admit }) => {
+      if (admit) {
+        run.router.markExhausted(run.targetB.providerId, {
+          reason: 'old quota',
+          source: 'probe',
+          now: Date.now() - 300_001,
+        })
+        const admission = run.router.tryAdmit(run.targetB.providerId)
+        if (!admission.ok) throw new Error('Probe should be due')
+        run.targetB.availabilityLease = admission.lease
+        run.controller.abort()
+      }
+      return { ok: true, target: run.targetB }
+    })
+    await runClaudeChat(run.args)
+    expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+    expect(run.events.filter((event) => event.kind === 'aborted')).toHaveLength(1)
+    const { listClaudeAttempts } = await import('../../src/main/chat/subscription-failover/claude-attempts')
+    expect(listClaudeAttempts()).toHaveLength(0)
+    expect(run.router.getHealth(run.targetB.providerId).state).toBe('exhausted')
+    expect(run.router.tryAdmit(run.targetB.providerId).ok).toBe(true)
+  })
+
+  it('rotates initialization quota without creating a second assistant bubble', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    run.a.manager.createQuery.mockImplementation(() => {
+      throw new Error("You've hit your usage limit")
+    })
+    await runClaudeChat(run.args)
+    expect(run.effect).not.toHaveBeenCalled()
+    expect(run.b.received[0]).toContain('Finish the existing work.')
+    expect(run.events.filter((event) => event.kind === 'message-start')).toHaveLength(1)
+    expect(run.events.filter((event) => event.kind === 'finish')).toHaveLength(1)
+  })
+
+  it('compacts the full checkpoint before admitting a smaller fallback', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    run.targetB.contextWindow = 24_000
+    run.effect.mockResolvedValue('recorded-effect '.repeat(5_000))
+    const compactHistory = vi.fn(async () => {
+      expect(run.resolve.mock.calls.every(([input]) => input.admit === false)).toBe(true)
+      return {
+        summary: 'The effect completed on A. Continue without repeating it.',
+        usage: { input: 5, output: 2, cacheRead: 0, cacheCreate: 0, totalInput: 5 },
+      }
+    })
+    await runClaudeChat({ ...run.args, compactHistory })
+    expect(compactHistory).toHaveBeenCalledOnce()
+    expect(run.b.received[0]).toContain('The effect completed on A.')
+    expect(run.b.received[0]).not.toContain('recorded-effect recorded-effect')
+    expect(run.events.filter((event) => event.kind === 'compaction')).toHaveLength(1)
+    expect(run.events.filter((event) => event.kind === 'finish')).toHaveLength(1)
+  })
+
+  it.each([0, 20_000, 360_000])('waits for %i ms of admitted work during quota recovery', async (duration) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    let started!: () => void
+    const toolStarted = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    try {
+      const run = await setupRotation(async function* (options) {
+        yield {
+          ...finalAssistant('running-a', [
+            { type: 'tool_use', id: 'slow-call', name: 'mcp__maestrly__record_effect', input: {} },
+          ]),
+          session_id: 'session-a',
+        } as SDKMessage
+        await options.hooks.PreToolUse[0].hooks[0](
+          {
+            hook_event_name: 'PreToolUse',
+            tool_name: 'mcp__maestrly__record_effect',
+            tool_input: {},
+            tool_use_id: 'slow-call',
+          },
+          'slow-call',
+          { signal: new AbortController().signal }
+        )
+        void options.mcpServers.maestrly.instance._registeredTools.record_effect.handler({}, {}).catch(() => {})
+        await toolStarted
+        yield {
+          type: 'rate_limit_event',
+          uuid: '00000000-0000-4000-8000-000000000002',
+          session_id: 'session-a',
+          rate_limit_info: { status: 'rejected' },
+        } as SDKMessage
+      })
+      run.effect.mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            started()
+            setTimeout(() => resolve('slow-effect-completed'), duration)
+          })
+      )
+      const promise = runClaudeChat(run.args)
+      await toolStarted
+      for (let i = 0; i < 30; i++) await Promise.resolve()
+      expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(duration)
+      await promise
+      expect(run.effect).toHaveBeenCalledOnce()
+      expect(run.b.received[0]).toContain('slow-effect-completed')
+      expect(run.events.filter((event) => event.kind === 'finish')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    'rate-event',
+    'result',
+  ])('publishes %s exhaustion before waiting for a recovering managed child', async (failureKind) => {
+    let started!: () => void
+    const childStarted = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    let childFinished!: () => void
+    const childDone = new Promise<void>((resolve) => {
+      childFinished = resolve
+    })
+    const run = await setupRotation(async function* (options) {
+      const input = { agent: 'general-purpose', prompt: 'Finish the child work.' }
+      yield {
+        ...finalAssistant('parent-a', [{ type: 'tool_use', id: 'child-task', name: 'mcp__maestrly__task', input }]),
+        session_id: 'session-a',
+      } as SDKMessage
+      await options.hooks.PreToolUse[0].hooks[0](
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'mcp__maestrly__task',
+          tool_input: input,
+          tool_use_id: 'child-task',
+        },
+        'child-task',
+        { signal: new AbortController().signal }
+      )
+      void options.mcpServers.maestrly.instance._registeredTools.task.handler(input, {}).catch(() => {})
+      await childStarted
+      if (failureKind === 'result') {
+        yield errorResultMessage(["You've hit your usage limit"], 'session-a')
+        await childDone
+      } else {
+        yield {
+          type: 'rate_limit_event',
+          uuid: '00000000-0000-4000-8000-000000000003',
+          session_id: 'session-a',
+          rate_limit_info: { status: 'rejected' },
+        } as SDKMessage
+      }
+    })
+    const definition = {
+      name: 'general-purpose',
+      description: 'Worker',
+      prompt: 'Complete the work.',
+      source: 'built-in',
+    }
+    const profile = {
+      version: 1,
+      agentName: definition.name,
+      effective: {
+        providerId: run.targetA.providerId,
+        modelId: 'sonnet',
+        configuredEffort: 'off',
+        source: 'conversation-default',
+        candidateIndex: 0,
+      },
+      attempts: [],
+    }
+    h.listAgents.mockResolvedValue([definition])
+    h.resolveSubagentExecutionProfile.mockResolvedValue({ definition, profile })
+    h.runClaudeSubagent.mockImplementation(async () => {
+      started()
+      await vi.waitFor(() => expect(run.router.getHealth(run.targetA.providerId).state).toBe('exhausted'))
+      childFinished()
+      return {
+        text: 'Child recovered and completed without redispatch.',
+        model: { providerId: run.targetB.providerId, modelId: 'sonnet' },
+        usage: { input: 4, output: 2, cacheRead: 0, cacheCreate: 0, totalInput: 4 },
+      }
+    })
+    await runClaudeChat(run.args)
+    expect(h.runClaudeSubagent).toHaveBeenCalledTimes(1)
+    expect(run.b.received[0]).toContain('Child recovered and completed without redispatch.')
+    const assistant = listChatMessages(run.conversation.id).find((message) => message.role === 'assistant')!
+    expect(assistant.parts.filter((part) => part.type === 'tool' && part.toolCallId === 'child-task')).toHaveLength(1)
+    expect(assistant.usage).toMatchObject({ subInput: 4, subOutput: 2 })
+    expect(run.events.filter((event) => event.kind === 'finish')).toHaveLength(1)
+  })
+
+  it('retires a quota-blocked native compact session before requesting a portable summary', async () => {
+    const run = await setupRotation(async function* () {
+      yield {
+        ...finalAssistant('native-a', [{ type: 'text', text: 'Initial work.' }]),
+        session_id: 'session-a',
+      } as SDKMessage
+      yield resultMessage('session-a')
+    })
+    await runClaudeChat(run.args)
+    Object.assign(run.a.manager, { listModels: vi.fn(async () => []) })
+    const query = {
+      close: vi.fn(),
+      interrupt: vi.fn(async () => {}),
+      initializationResult: vi.fn(async () => ({ account: { apiProvider: 'firstParty' } })),
+      getContextUsage: vi.fn(async () => ({ totalTokens: 200, maxTokens: 200_000, model: 'claude-sonnet' })),
+      async *[Symbol.asyncIterator]() {
+        yield errorResultMessage(["You've hit your usage limit"], 'session-a')
+        yield {
+          type: 'rate_limit_event',
+          uuid: '00000000-0000-4000-8000-000000000004',
+          session_id: 'session-a',
+          rate_limit_info: { status: 'rejected' },
+        } as SDKMessage
+      },
+    }
+    run.a.manager.createQuery.mockReturnValue(query)
+    const compactHistory = vi.fn(async () => {
+      expect(getClaudeSessionBinding(run.conversation.id)).toBeNull()
+      return {
+        summary: 'Portable continuation.',
+        usage: { input: 3, output: 2, cacheRead: 0, cacheCreate: 0, totalInput: 3 },
+        runtimeEstimatedCostUsd: 0.01,
+      }
+    })
+    const result = await compactClaudeSession({ ...run.args, compactHistory })
+    expect(result).toMatchObject({
+      success: true,
+      portable: true,
+      summary: 'Portable continuation.',
+      usage: { input: 123, output: 10, runtimeEstimatedCostUsd: 0.0223 },
+    })
+    expect(compactHistory).toHaveBeenCalledOnce()
+    expect(query.close).toHaveBeenCalledOnce()
+    expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+  })
+
+  it('preserves a known failed tool diagnostic when quota precedes its SDK ACK', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    run.effect.mockResolvedValue({ text: 'The first write succeeded but verification failed.', isError: true } as never)
+    await runClaudeChat(run.args)
+    expect(run.b.received[0]).toContain('The first write succeeded but verification failed.')
+    expect(run.b.received[0]).not.toContain('Tool execution outcome is uncertain')
+    expect(run.effect).toHaveBeenCalledOnce()
+  })
+
+  it('prices token-only failed attempts after an earlier attempt supplied native cost', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    const b = rotationManager('acc_rotation_b', async function* () {
+      yield {
+        ...finalAssistant('partial-b', [{ type: 'text', text: 'Partial B work.' }]),
+        session_id: 'session-b',
+      } as SDKMessage
+      yield {
+        type: 'rate_limit_event',
+        uuid: '00000000-0000-4000-8000-000000000005',
+        session_id: 'session-b',
+        rate_limit_info: { status: 'rejected' },
+      } as SDKMessage
+    })
+    run.targetB.manager = b.manager as unknown as ClaudeSubscriptionManager
+    const c = rotationManager('acc_rotation_c', async function* () {
+      yield resultMessage('session-c')
+    })
+    c.manager.createQuery.mockImplementation(() => {
+      throw new Error('Connection failed before initialization')
+    })
+    const targetC = {
+      ...run.targetB,
+      providerId: 'builtin_claude_subscription@acc_rotation_c',
+      accountId: 'acc_rotation_c',
+      manager: c.manager as unknown as ClaudeSubscriptionManager,
+      accountIdentity: { fingerprint: 'acc_rotation_c', epoch: 1 },
+    }
+    run.router.resetProvider(targetC.providerId)
+    run.args.failoverChain.push(targetC.providerId)
+    run.resolve.mockImplementation(async ({ attemptedProviderIds }) => ({
+      ok: true,
+      target: attemptedProviderIds.has(run.targetB.providerId) ? targetC : run.targetB,
+    }))
+    await runClaudeChat(run.args)
+    const assistant = listChatMessages(run.conversation.id).find((message) => message.role === 'assistant')!
+    expect(assistant.usage).toMatchObject({
+      input: 122,
+      output: 20,
+      runtimeEstimatedCostUsd: 0.0123,
+      catalogInput: 2,
+      catalogOutput: 12,
+    })
+    expect(run.events.filter((event) => event.kind === 'error')).toHaveLength(1)
+  })
+
+  it('drains parallel tools before a portable compaction hides their transcript prefix', async () => {
+    let started!: () => void
+    let release!: (value: string) => void
+    const toolStarted = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    let queries = 0
+    const run = await setupRotation(async function* (options) {
+      if (queries++ > 0) {
+        yield resultMessage('session-fresh')
+        return
+      }
+      const assistant = finalAssistant('parallel-a', [
+        { type: 'tool_use', id: 'fast-tool', name: 'mcp__maestrly__record_effect', input: {} },
+        { type: 'tool_use', id: 'slow-tool', name: 'mcp__maestrly__record_effect', input: {} },
+      ]) as Extract<SDKMessage, { type: 'assistant' }>
+      yield {
+        ...assistant,
+        session_id: 'session-a',
+        message: { ...assistant.message, stop_reason: 'tool_use' as const },
+      }
+      const hook = options.hooks.PreToolUse[0].hooks[0]
+      const handler = options.mcpServers.maestrly.instance._registeredTools.record_effect.handler
+      await hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'mcp__maestrly__record_effect',
+          tool_input: {},
+          tool_use_id: 'fast-tool',
+        },
+        'fast-tool',
+        {}
+      )
+      const first = handler({}, {})
+      await hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'mcp__maestrly__record_effect',
+          tool_input: {},
+          tool_use_id: 'slow-tool',
+        },
+        'slow-tool',
+        {}
+      )
+      void handler({}, {}).catch(() => {})
+      await first
+      await toolStarted
+      yield {
+        type: 'user',
+        session_id: 'session-a',
+        uuid: '00000000-0000-4000-8000-000000000006',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'fast-tool', content: 'fast-result' }] },
+      } as SDKMessage
+    })
+    run.effect.mockResolvedValueOnce('fast-result').mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          release = resolve
+          started()
+        })
+    )
+    const originalFactory = run.a.manager.createQuery.getMockImplementation()!
+    run.a.manager.createQuery.mockImplementation((input) => {
+      const query = originalFactory(input)
+      query.getContextUsage.mockResolvedValue({
+        totalTokens: queries === 0 ? 900 : 100,
+        maxTokens: 200_000,
+        model: 'claude-sonnet',
+      })
+      return query
+    })
+    const compactHistory = vi.fn(async () => {
+      const assistant = listChatMessages(run.conversation.id).find((message) => message.role === 'assistant')!
+      expect(assistant.parts).toContainEqual(
+        expect.objectContaining({
+          toolCallId: 'slow-tool',
+          state: { status: 'completed', output: 'slow-result-before-summary' },
+        })
+      )
+      return { summary: 'Both tools completed: fast-result and slow-result-before-summary.' }
+    })
+    const pending = runClaudeChat({ ...run.args, contextWindow: 1000, compactHistory })
+    await toolStarted
+    for (let i = 0; i < 30; i++) await Promise.resolve()
+    expect(compactHistory).not.toHaveBeenCalled()
+    release('slow-result-before-summary')
+    await pending
+    expect(compactHistory).toHaveBeenCalledOnce()
+    expect(run.a.received[1]).toContain('slow-result-before-summary')
+    expect(run.effect).toHaveBeenCalledTimes(2)
+    expect(run.events.filter((event) => event.kind === 'finish')).toHaveLength(1)
+  })
+
+  it('keeps failed compaction usage in the terminal turn accounting', async () => {
+    const run = await setupRotation(quotaAfterTool)
+    run.targetB.contextWindow = 24_000
+    run.effect.mockResolvedValue('large output '.repeat(5000))
+    const compactHistory = vi.fn(async () => {
+      throw Object.assign(new Error('All summary attempts failed'), {
+        partialUsage: { input: 5, output: 1, cacheRead: 0, cacheCreate: 0, totalInput: 5 },
+        runtimeEstimatedCostUsd: 0.02,
+      })
+    })
+    await runClaudeChat({ ...run.args, compactHistory })
+    expect(run.b.manager.createQuery).not.toHaveBeenCalled()
+    expect(compactHistory).toHaveBeenCalledOnce()
+    const assistant = listChatMessages(run.conversation.id).find((message) => message.role === 'assistant')!
+    expect(assistant.usage).toMatchObject({ input: 125, output: 9 })
+    expect(assistant.usage?.runtimeEstimatedCostUsd).toBeCloseTo(0.0323)
+    expect(run.events.filter((event) => event.kind === 'error')).toHaveLength(1)
   })
 })

@@ -5,7 +5,8 @@ test('switches immediately and persists across reload, invitation and authorizat
   const initial = info.project.name as Locale
   const other = initial === 'en' ? 'pt-BR' : 'en'
   const L = (key: string) => translate(key, other)
-  await page.route('**/api/auth/get-session', route => route.fulfill({json:null}))
+  let signedIn=false
+  await page.route('**/api/auth/get-session', route => route.fulfill({json:signedIn?{user:{id:'locale-user',name:'Locale user',email:'someone@example.test'}}:null}))
   await page.route('**/api/auth/sign-in/email', route => route.fulfill({status:401,json:{message:'Invalid email or password'}}))
   await page.goto('/')
   await expect(page.locator('html')).toHaveAttribute('lang',initial)
@@ -27,6 +28,10 @@ test('switches immediately and persists across reload, invitation and authorizat
   await expect(page.getByRole('heading',{name:L('Join this instance')})).toBeVisible()
   await expect(page.getByRole('combobox')).toHaveText(other === 'en' ? 'English' : 'Português (Brasil)')
   await page.goto('/device')
+  await expect(page.getByRole('heading',{name:L('Sign in'),exact:true})).toBeVisible()
+  await expect(page.getByRole('combobox')).toHaveText(other === 'en' ? 'English' : 'Português (Brasil)')
+  signedIn=true
+  await page.reload()
   await expect(page.getByRole('heading',{name:L('Connect a client')})).toBeVisible()
   await expect(page.getByRole('combobox')).toHaveText(other === 'en' ? 'English' : 'Português (Brasil)')
 })

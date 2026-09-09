@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { SDKCompactBoundaryMessage, SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
+import type {
+  SDKCompactBoundaryMessage,
+  SDKMessage,
+  SDKResultMessage,
+  SDKRateLimitInfo,
+} from '@anthropic-ai/claude-agent-sdk'
 import { jsonSchema, tool, type ToolSet } from 'ai'
 import type {
   ChatMessage,
@@ -7,13 +12,15 @@ import type {
   ChatPermMode,
   ChatStreamEvent,
   ChatSubagentUsage,
+  ChatSubscriptionFailoverEvent,
   MessagePart,
   SubagentRunMeta,
 } from '../../../shared/chat'
 import type { ChatBehavior } from '../../../shared/conversation-experience'
+import { capabilityBehaviorFor } from '../../../shared/chat-mode'
 import type { MaestroTurnSnapshotV1 } from '../../../shared/maestro'
 import type { MaestroLiveRunPort } from '../maestro-live'
-import { applyChatEvent } from '../../../shared/chat'
+import { applyChatEvent, toolOutputText } from '../../../shared/chat'
 import { responseDurationMs } from '../../../shared/response-duration'
 import { getAppFlag, getConversation, getConvUiPrefs } from '../../store'
 import { gitEnvInfo } from '../../git-service'
@@ -60,7 +67,11 @@ import {
   isClaudeAuthenticationRequired,
   redactClaudeCredentials,
 } from './errors'
-import type { ClaudeSubscriptionAccountIdentity, ClaudeSubscriptionManager } from './manager'
+import {
+  getClaudeSubscriptionManager,
+  type ClaudeSubscriptionAccountIdentity,
+  type ClaudeSubscriptionManager,
+} from './manager'
 import { buildClaudeChatQueryOptions, buildClaudeCompactionQueryOptions } from './options'
 import {
   buildClaudeSessionBinding,
@@ -100,6 +111,20 @@ import {
 import { buildClaudeToolBridge, CLAUDE_DISALLOWED_NATIVE_TOOLS, type ClaudeToolBridge } from './tools'
 import { normalizeClaudeUsage, type NormalizedClaudeUsage } from './usage'
 import { claudeServedModelMismatch } from './served-model'
+import { renderDesignUltraGuidance } from '../design-mode-prompt'
+import { FABLE_51_PROFILE_FLAG, resolveFableBehaviorProfile, type FableBehaviorProfile } from '../fable/profile'
+import { fableEnvironmentContext } from '../fable/prompt'
+import { createFablePostToolUseHook } from '../fable/sdk-hooks'
+import { estimateTextTokens, portableContextLoad } from '../portable-context'
+import { classifyClaudeQuotaFailure } from './quota-error'
+import { createClaudeToolJournal, type ClaudeToolJournal } from './tool-journal'
+import { beginClaudeAttempt } from '../subscription-failover/claude-attempts'
+import {
+  settleClaudeAttempt,
+  type ClaudeRuntimeTarget,
+  type ResolveClaudeTargetResult,
+} from '../subscription-failover/claude-adapter'
+import type { MarkExhaustedInfo } from '../subscription-failover/types'
 
 const MAX_IN_TURN_COMPACTIONS = 2
 const PORTABLE_CONTINUE_PROMPT =
@@ -111,6 +136,8 @@ export interface RunClaudeChatArgs {
   cwd: string
   selection: ChatModelRef
   resolvedModelId?: string
+  /** Behavior resolved once at turn admission. undefined keeps direct-call compatibility by resolving locally. */
+  behaviorProfile?: FableBehaviorProfile | null
   /** Runtime model id frozen for an isolated review-loop execution. */
   frozenResolvedModelId?: string
   mode: ChatBehavior
@@ -129,13 +156,21 @@ export interface RunClaudeChatArgs {
   emit: (event: ChatStreamEvent) => void
   signal: AbortSignal
   responseStartedAt?: number
-  onSessionReady?: (sessionId: string) => boolean
-  canPersistSession?: () => boolean
-  onModelContextWindow?: (contextWindow: number) => void
+  initialTarget?: ClaudeRuntimeTarget
+  failoverChain?: readonly string[]
+  resolveNextTarget?: (input: {
+    attemptedProviderIds: ReadonlySet<string>
+    admit?: boolean
+  }) => Promise<ResolveClaudeTargetResult>
+  onEffectiveTargetChanged?: (target: ClaudeRuntimeTarget) => void
+  onFailoverTransition?: (event: ChatSubscriptionFailoverEvent) => void
+  onSessionReady?: (sessionId: string, target: ClaudeRuntimeTarget) => boolean
+  canPersistSession?: (target: ClaudeRuntimeTarget) => boolean
+  onModelContextWindow?: (contextWindow: number, target: ClaudeRuntimeTarget) => void
   /** Effective model window. Together with compactHistory, enables portable intra-turn compaction. */
   contextWindow?: number
   /** Summarizes durable visible history; the returned boundary is persisted in the live assistant bubble. */
-  compactHistory?: () => Promise<{
+  compactHistory?: (target?: ClaudeRuntimeTarget) => Promise<{
     summary: string
     usage?: NormalizedAiUsage
     runtimeEstimatedCostUsd?: number
@@ -173,6 +208,7 @@ interface RunnerState {
   runTask: ClaudeManagedTaskRunner | null
   coordinator: SubagentCoordinator
   queryAbortController: AbortController | null
+  toolJournal?: ClaudeToolJournal
   /**
    * Publish the generated image part (generate_image). Only REAL turns define this; inspect/compact omit the tool
    * because they have no assistant message to display the artifact.
@@ -188,6 +224,9 @@ interface PreparedRuntime {
   bridge: ClaudeToolBridge
   systemPrompt: string
   promptHash: string
+  transientContext?: string
+  fablePostToolUseHook?: ReturnType<typeof createFablePostToolUseHook>
+  behaviorProfile?: FableBehaviorProfile
   agents: ChatAgent[]
   close: () => Promise<void>
 }
@@ -305,12 +344,10 @@ function usageFromResult(
     // The runtime cost here covers ONLY auxiliary calls with estimates; MAIN buckets (and auxiliary buckets
     // without estimates) still use the catalog. Runtime-covered tokens are SUBTRACTED from the residual;
     // otherwise the ledger/card would add auxiliary runtime cost AND price the same tokens again via the catalog.
-    const auxIn = (hasAuxCatalog ? auxCatalog!.input : 0) + (hasAuxRuntimeTokens ? auxRuntimeTokens!.input : 0)
-    const auxOut = (hasAuxCatalog ? auxCatalog!.output : 0) + (hasAuxRuntimeTokens ? auxRuntimeTokens!.output : 0)
-    const auxRead =
-      (hasAuxCatalog ? auxCatalog!.cacheRead : 0) + (hasAuxRuntimeTokens ? auxRuntimeTokens!.cacheRead : 0)
-    const auxCreate =
-      (hasAuxCatalog ? auxCatalog!.cacheCreate : 0) + (hasAuxRuntimeTokens ? auxRuntimeTokens!.cacheCreate : 0)
+    const auxIn = hasAuxRuntimeTokens ? auxRuntimeTokens!.input : 0
+    const auxOut = hasAuxRuntimeTokens ? auxRuntimeTokens!.output : 0
+    const auxRead = hasAuxRuntimeTokens ? auxRuntimeTokens!.cacheRead : 0
+    const auxCreate = hasAuxRuntimeTokens ? auxRuntimeTokens!.cacheCreate : 0
     catalogInput = Math.max(0, main.input - auxIn)
     catalogOutput = Math.max(0, main.output - auxOut)
     catalogCacheRead = Math.max(0, main.cacheRead - auxRead)
@@ -436,6 +473,7 @@ async function prepareRuntime(
   assistantId: string,
   state: RunnerState
 ): Promise<PreparedRuntime> {
+  const capabilityMode = capabilityBehaviorFor(args.mode)
   const activateTerminalStep = (toolCallId: string): void => {
     state.planSubmitted = true
     state.planToolCallId = toolCallId
@@ -597,12 +635,12 @@ async function prepareRuntime(
       : await listEffectiveAgents({
           cwd: args.cwd,
           conversationId: args.conversationId,
-          mode: args.mode === 'agent' || args.mode === 'maestro' ? 'agent' : 'plan',
+          mode: capabilityMode === 'agent' || args.mode === 'maestro' ? 'agent' : 'plan',
         })
     const agents =
       args.mode === 'maestro' && args.maestro
         ? maestroAgentsFromTurn(args.maestro, allAgents)
-        : args.mode === 'agent'
+        : capabilityMode === 'agent'
           ? allAgents
           : args.maestrlyUltra
             ? allAgents.filter((agent) => agent.name === 'explore')
@@ -660,8 +698,12 @@ async function prepareRuntime(
         })
       : {}
     const tools: ToolSet = { ...hostTools, ...taskTools, ...supervisionTools }
-    const bridge = await buildClaudeToolBridge(tools, args.signal, undefined, () =>
-      args.manager.assertAccountIdentity(args.accountIdentity)
+    const bridge = await buildClaudeToolBridge(
+      tools,
+      args.signal,
+      undefined,
+      () => args.manager.assertAccountIdentity(args.accountIdentity),
+      state.toolJournal
     )
     const projectContext = await buildProjectContext(args.projectId, args.cwd)
     const git = await gitEnvInfo(args.cwd).catch(() => null)
@@ -678,23 +720,39 @@ async function prepareRuntime(
     const ultra = args.maestrlyUltra
       ? args.mode === 'maestro'
         ? 'Maximum-rigor reasoning applies only to the orchestrator. Keep the frozen Strategy and choose agents deliberately from the Pool.'
-        : args.mode === 'agent'
-          ? 'Maximum-rigor Maestrly Ultra mode is active. Decompose non-trivial work, delegate independent slices through task when useful, integrate results, verify, and review before finishing.'
-          : 'Maximum-rigor Maestrly Ultra mode is active. Stay read-only, investigate deeply, and cross-check the conclusion.'
+        : args.mode === 'design'
+          ? renderDesignUltraGuidance(args.mode)
+          : args.mode === 'agent'
+            ? 'Maximum-rigor Maestrly Ultra mode is active. Decompose non-trivial work, delegate independent slices through task when useful, integrate results, verify, and review before finishing.'
+            : 'Maximum-rigor Maestrly Ultra mode is active. Stay read-only, investigate deeply, and cross-check the conclusion.'
       : ''
+    const behaviorProfile =
+      args.behaviorProfile === undefined
+        ? resolveFableBehaviorProfile({
+            requestedModelId: args.selection.modelId,
+            resolvedModelId: args.frozenResolvedModelId ?? args.resolvedModelId,
+            enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
+          }).profile
+        : args.behaviorProfile
     const systemPrompt = [
-      SYSTEM_PROMPT(args.cwd, appToolsEnabled, args.mode, Boolean(getConversation(args.conversationId))),
+      SYSTEM_PROMPT(
+        args.cwd,
+        appToolsEnabled,
+        args.mode,
+        Boolean(getConversation(args.conversationId)),
+        behaviorProfile
+      ),
       '# Active runtime\nYou are running through the official Anthropic Claude Agent SDK. Maestrly owns the system prompt, tools, permissions, skills, subagents, plans, questions and persistence. Use only the supplied Maestrly MCP tools; native Claude Code extensions are disabled.',
       projectContext,
       skills.length ? `# Project skills\n${skillsCatalog(skills)}` : '',
       agents.length
         ? args.mode === 'maestro'
           ? renderMaestroAgentCatalog(args.maestro!)
-          : `# Maestrly subagents\n${agentsCatalog(agents, args.conversationId, args.mode !== 'agent')}`
+          : `# Maestrly subagents\n${agentsCatalog(agents, args.conversationId, capabilityMode !== 'agent')}`
         : '',
       args.mode === 'maestro' && args.maestro ? renderMaestroTurnPolicy(args.maestro) : '',
       ultra ? `# Ultra mode\n${ultra}` : '',
-      `# Environment\n${env}`,
+      behaviorProfile ? '' : `# Environment\n${env}`,
     ]
       .filter(Boolean)
       .join('\n\n')
@@ -704,6 +762,9 @@ async function prepareRuntime(
       bridge,
       systemPrompt,
       promptHash: createHash('sha256').update(systemPrompt).digest('hex'),
+      ...(behaviorProfile ? { transientContext: fableEnvironmentContext(env) } : {}),
+      ...(behaviorProfile ? { fablePostToolUseHook: createFablePostToolUseHook() } : {}),
+      ...(behaviorProfile ? { behaviorProfile } : {}),
       agents,
       close: async () => {
         await Promise.all([mcp.close(), app.close()])
@@ -766,7 +827,65 @@ export async function inspectClaudeSessionCompatibility(args: InspectClaudeSessi
 
 /** Official Claude runtime adapter: Maestrly owns product behavior while Agent SDK owns the agent loop. */
 export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeChatResult> {
+  try {
+    return await runClaudeChatTurn(args)
+  } finally {
+    // Admission precedes message/runtime preparation. Release even if preparation throws
+    // before the turn's own attempt registry exists; stale/settled leases are ignored.
+    if (args.initialTarget?.availabilityLease) settleClaudeAttempt(args.initialTarget, 'other')
+  }
+}
+
+async function runClaudeChatTurn(args: RunClaudeChatArgs): Promise<RunClaudeChatResult> {
   if (args.signal.aborted) throw new Error('Turn aborted before Claude started.')
+  const hostAbortController = new AbortController()
+  const hostSignal = AbortSignal.any([args.signal, hostAbortController.signal])
+  let currentTarget: ClaudeRuntimeTarget = args.initialTarget ?? {
+    providerId: args.selection.providerId,
+    accountId: args.manager.accountId ?? null,
+    manager: args.manager,
+    accountIdentity: args.accountIdentity,
+    model: { value: args.selection.modelId, displayName: args.selection.modelId, description: '' },
+    runtimeModelId: args.frozenResolvedModelId ?? args.resolvedModelId ?? args.selection.modelId,
+    reasoningEffort: args.reasoningEffort,
+    fastMode: args.fastMode === true,
+    maestrlyUltra: args.maestrlyUltra === true,
+    contextWindow: args.contextWindow ?? null,
+  }
+  args = {
+    ...args,
+    signal: hostSignal,
+    manager: currentTarget.manager,
+    accountIdentity: currentTarget.accountIdentity,
+    resolvedModelId: currentTarget.runtimeModelId,
+    reasoningEffort: currentTarget.reasoningEffort,
+    fastMode: currentTarget.fastMode,
+    maestrlyUltra: currentTarget.maestrlyUltra,
+  }
+  const attemptedProviderIds = new Set([currentTarget.providerId])
+  const failoverEnabled =
+    !args.ephemeralSession &&
+    !args.frozenResolvedModelId &&
+    (args.failoverChain?.length ?? 0) > 1 &&
+    !!args.resolveNextTarget
+  let accountAttemptSettled = false
+  const settleAccountAttempt = (outcome: 'success' | 'quota' | 'other', info?: MarkExhaustedInfo): void => {
+    if (accountAttemptSettled) return
+    accountAttemptSettled = true
+    settleClaudeAttempt(currentTarget, outcome, info)
+  }
+  let accountAttempt: ReturnType<typeof beginClaudeAttempt> | undefined
+  const startAccountAttempt = (): void => {
+    const target = currentTarget
+    accountAttempt = beginClaudeAttempt({
+      providerId: target.providerId,
+      accountIdentity: target.accountIdentity,
+      scope: 'root',
+      conversationId: args.conversationId,
+      abort: (reason) => hostAbortController.abort(reason),
+    })
+    args.onEffectiveTargetChanged?.(target)
+  }
   args.manager.assertAccountIdentity(args.accountIdentity)
   if (!args.accountIdentity.fingerprint) throw new Error('Claude is not authenticated.')
   if (args.ephemeralSession && args.frozenResolvedModelId) {
@@ -865,8 +984,8 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
     ...(args.messageMeta?.reviewLoop ? { reviewLoop: args.messageMeta.reviewLoop } : {}),
   })
 
-  const queryAbortController = new AbortController()
-  const runtimeSignal = AbortSignal.any([args.signal, queryAbortController.signal])
+  let queryAbortController = new AbortController()
+  const runtimeSignal = args.signal
   const state: RunnerState = {
     planSubmitted: false,
     planToolCallId: null,
@@ -925,9 +1044,25 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
     cacheCreate: 0,
     totalInput: 0,
   }
+  const recordedHelperFailures = new WeakSet<object>()
+  const recordFailedHelper = (error: unknown): void => {
+    if (!isRecord(error) || recordedHelperFailures.has(error)) return
+    recordedHelperFailures.add(error)
+    const usage = isRecord(error.partialUsage)
+      ? normalizedPortableUsage(error.partialUsage as unknown as NormalizedAiUsage)
+      : undefined
+    if (usage) portableCompactorUsage.push(usage)
+    const cost = error.runtimeEstimatedCostUsd
+    const covered = typeof cost === 'number' && Number.isFinite(cost) && cost >= 0
+    if (covered) portableCompactorRuntimeCostUsd += cost
+    if (usage) {
+      const buckets = covered ? portableCompactorRuntimeCoveredUsage : portableCompactorCatalogUsage
+      for (const key of ['input', 'output', 'cacheRead', 'cacheCreate'] as const) buckets[key] += usage[key]
+    }
+  }
   const retiredSessionIds = new Set<string>()
-  const portableContextWindow = safeTokens(args.contextWindow)
-  const runtimeModelId = args.frozenResolvedModelId ?? args.resolvedModelId ?? args.selection.modelId
+  let portableContextWindow = safeTokens(args.contextWindow ?? currentTarget.contextWindow)
+  const runtimeModelId = currentTarget.runtimeModelId
   const closeQuery = (): void => {
     if (queryClosed) return
     queryClosed = true
@@ -942,55 +1077,131 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
   args.signal.addEventListener('abort', onAbort, { once: true })
   if (args.signal.aborted) onAbort()
 
-  const retireManagedSession = async (retiredSessionId: string): Promise<void> => {
+  const retireManagedSession = async (retiredSessionId: string, owner = currentTarget): Promise<void> => {
     if (!retiredSessionId || retiredSessionIds.has(retiredSessionId)) return
     retiredSessionIds.add(retiredSessionId)
     retireClaudeSessionBinding(args.conversationId, retiredSessionId)
-    queueClaudeSessionCleanup(args.conversationId, retiredSessionId, args.cwd, args.manager.accountId ?? null)
+    queueClaudeSessionCleanup(args.conversationId, retiredSessionId, args.cwd, owner.accountId)
     try {
-      await args.manager.deleteManagedSession(retiredSessionId, args.cwd)
+      await owner.manager.deleteManagedSession(retiredSessionId, args.cwd)
       clearClaudeSessionCleanup(retiredSessionId)
     } catch (error) {
       markClaudeSessionCleanupFailed(retiredSessionId, claudeSubscriptionErrorMessage(error))
     }
   }
 
-  try {
+  const createJournal = (): ClaudeToolJournal => {
+    const target = currentTarget
+    const journal = createClaudeToolJournal({
+      attemptId: randomUUID(),
+      onEntry: (entry) => {
+        // This callback is the durable host result, even if the SDK never acknowledges it.
+        if (terminalCommitted) return
+        try {
+          target.manager.assertAccountIdentity(target.accountIdentity)
+        } catch {
+          return
+        }
+        if (!currentToolState(entry.toolCallId)) {
+          apply({
+            kind: 'tool-input-start',
+            messageId: assistantId,
+            toolCallId: entry.toolCallId,
+            toolName: entry.toolName,
+          })
+          apply({
+            kind: 'tool-call',
+            messageId: assistantId,
+            toolCallId: entry.toolCallId,
+            toolName: entry.toolName,
+            input: entry.input,
+          })
+        }
+        const sub = state.subagentRuns.get(entry.toolCallId)
+        apply(
+          {
+            kind: 'tool-state',
+            messageId: assistantId,
+            toolCallId: entry.toolCallId,
+            state:
+              entry.state === 'running'
+                ? { status: 'running', ...(sub ? { sub } : {}) }
+                : entry.state === 'completed'
+                  ? { status: 'completed', output: entry.output ?? '', ...(sub ? { sub } : {}) }
+                  : {
+                      status: 'error',
+                      error:
+                        entry.error ??
+                        (entry.output !== undefined
+                          ? toolOutputText(entry.output)
+                          : 'Tool execution outcome is uncertain; inspect before repeating.'),
+                      ...(sub ? { sub } : {}),
+                    },
+          },
+          true
+        )
+      },
+    })
+    return journal
+  }
+  const rebuildRuntime = async (): Promise<void> => {
+    state.toolJournal = createJournal()
     runtime = await prepareRuntime({ ...args, signal: runtimeSignal }, assistantId, state)
+  }
+  try {
+    startAccountAttempt()
+    await rebuildRuntime()
+    if (!runtime) throw new Error('Claude runtime preparation failed.')
+    runtime = runtime as PreparedRuntime
+    chatDiag({
+      kind: 'fable-behavior-profile',
+      profile: runtime.behaviorProfile?.id ?? 'legacy',
+      requestedModel: args.selection.modelId,
+      resolvedModel: runtimeModelId,
+      transport: 'claude-agent-sdk',
+      effort: args.reasoningEffort ?? 'default',
+      progressMode: runtime.behaviorProfile?.progressMode ?? 'prompt-only',
+      conv: args.conversationId,
+    })
     args.signal.throwIfAborted()
-    state.runTask = args.reviewerRuntime
-      ? null
-      : createClaudeTaskRuntime({
-          conversationId: args.conversationId,
-          projectId: args.projectId,
-          cwd: args.cwd,
-          mode: args.mode,
-          maestro: args.maestro,
-          maestroLive: args.maestroLive,
-          permMode: args.permMode,
-          selection: args.selection,
-          reasoningEffort: args.reasoningEffort,
-          fastMode: args.fastMode === true,
-          manager: args.manager,
-          accountIdentity: args.accountIdentity,
-          broker: args.broker,
-          questionBroker: args.questionBroker,
-          assistantId,
-          agents: runtime.agents,
-          tools: runtime.rawTools,
-          coordinator: state.coordinator,
-          subagentUsage,
-          apply,
-          emitGeneratedImage: state.emitGeneratedImage,
-          onGeneratedImageUsage: state.onGeneratedImageUsage,
-          turnState: createExplicitSubagentTurnState(
-            detectExplicitSubagentsForTurn(
-              history,
-              runtime.agents.map((agent) => agent.name)
-            ),
-            runtime.agents.map((agent) => agent.name)
-          ),
-        })
+    let explicitTurnState: ReturnType<typeof createExplicitSubagentTurnState> | undefined
+    const prepareTasks = (): void => {
+      explicitTurnState ??= createExplicitSubagentTurnState(
+        detectExplicitSubagentsForTurn(
+          history,
+          runtime!.agents.map((agent) => agent.name)
+        ),
+        runtime!.agents.map((agent) => agent.name)
+      )
+      state.runTask = args.reviewerRuntime
+        ? null
+        : createClaudeTaskRuntime({
+            conversationId: args.conversationId,
+            projectId: args.projectId,
+            cwd: args.cwd,
+            mode: args.mode,
+            maestro: args.maestro,
+            maestroLive: args.maestroLive,
+            permMode: args.permMode,
+            selection: args.selection,
+            reasoningEffort: args.reasoningEffort,
+            fastMode: args.fastMode === true,
+            manager: args.manager,
+            accountIdentity: args.accountIdentity,
+            broker: args.broker,
+            questionBroker: args.questionBroker,
+            assistantId,
+            agents: runtime!.agents,
+            tools: runtime!.rawTools,
+            coordinator: state.coordinator,
+            subagentUsage,
+            apply,
+            emitGeneratedImage: state.emitGeneratedImage,
+            onGeneratedImageUsage: state.onGeneratedImageUsage,
+            turnState: explicitTurnState,
+          })
+    }
+    prepareTasks()
 
     const previousMessage = history.at(-2) ?? null
     const existing = getClaudeSessionBinding(args.conversationId)
@@ -1014,18 +1225,39 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
       mappedAssistantUuid: mapping?.sdkAssistantUuid ?? null,
       mappedSessionId: mapping?.sessionId ?? null,
     })
+    chatDiag({
+      kind: 'claude-session-resolution',
+      profile: runtime.behaviorProfile?.id ?? 'legacy',
+      model: runtimeModelId,
+      conv: args.conversationId,
+      resume: Boolean(resolution.resume),
+      fork: resolution.forkSession,
+      retire: resolution.retireExisting,
+      reason: args.ephemeralSession
+        ? 'ephemeral'
+        : !existing
+          ? 'no-binding'
+          : !compatible
+            ? 'incompatible-contract'
+            : resolution.forkSession
+              ? 'rewind-fork'
+              : resolution.resume
+                ? 'tip-resume'
+                : 'history-diverged',
+    })
     if (resolution.retireExisting && existing && !args.ephemeralSession) {
       retireClaudeSessionBinding(args.conversationId, existing.sessionId)
     }
     let intentionalPlanInterruptIssued = false
     let intentionalPlanInterruptCaught = false
-    const contextIdentity = createHash('sha256')
+    let contextIdentity = createHash('sha256')
       .update(
         `${args.selection.providerId}\0${runtimeModelId}\0${args.accountIdentity.fingerprint}\0${runtime.promptHash}`
       )
       .digest('hex')
     let nextPrompt = buildClaudeSessionPrompt(currentUser, claudeSeedTranscript(history, resolution.resume), {
       dropImages: args.dropImages,
+      transientContext: runtime.transientContext,
     })
     let nextResume: Pick<
       Parameters<typeof buildClaudeChatQueryOptions>[0],
@@ -1036,304 +1268,588 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
       forkSession: resolution.forkSession,
     }
     let maestroGuarded = false
+    let rateLimitInfo: SDKRateLimitInfo | undefined
+    let assistantFailure: unknown
+    let failureCode: 'claude-accounts-exhausted' | undefined
+    let switchingAccount = false
+    const rotationError = (resolution: Exclude<ResolveClaudeTargetResult, { ok: true }>): Error => {
+      if (resolution.error === 'aborted') return args.signal.reason ?? new Error(resolution.message)
+      const error = new Error(resolution.message)
+      if (resolution.reason === 'quota-exhausted') failureCode = 'claude-accounts-exhausted'
+      return Object.assign(error, { code: failureCode })
+    }
+    const completeUsage = (): NormalizedClaudeUsage | undefined =>
+      result
+        ? normalizeClaudeUsage(result.usage)
+        : aggregateClaudeUsage(streamMapper?.state().assistantUsageByMessageId.values() ?? [])
+    const archiveAttempt = (): void => {
+      if (currentAttemptUsageArchived) return
+      const usage = completeUsage()
+      if (usage) {
+        completedAttemptUsage.push(usage)
+        recordModelCallUsage({
+          runtime: 'claude-subscription',
+          providerId: currentTarget.providerId,
+          modelId: runtimeModelId,
+          conversationId: args.conversationId,
+          usage,
+        })
+      }
+      const cost = result?.total_cost_usd
+      if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
+        portableCompactorRuntimeCostUsd += cost
+        if (usage) {
+          portableCompactorRuntimeCoveredUsage.input += usage.input
+          portableCompactorRuntimeCoveredUsage.output += usage.output
+          portableCompactorRuntimeCoveredUsage.cacheRead += usage.cacheRead
+          portableCompactorRuntimeCoveredUsage.cacheCreate += usage.cacheCreate
+        }
+      } else if (usage) {
+        portableCompactorCatalogUsage.input += usage.input
+        portableCompactorCatalogUsage.output += usage.output
+        portableCompactorCatalogUsage.cacheRead += usage.cacheRead
+        portableCompactorCatalogUsage.cacheCreate += usage.cacheCreate
+      }
+      currentAttemptUsageArchived = true
+    }
+    const fullTranscript = (): string =>
+      renderTranscript([...history, messages[0]], { maxToolOutputChars: Number.POSITIVE_INFINITY })
+    const performFailover = async (error: unknown): Promise<boolean> => {
+      if (args.signal.aborted || state.planSubmitted || switchingAccount) return false
+      if (!accountAttempt) return false
+      const classification = classifyClaudeQuotaFailure(error, rateLimitInfo)
+      if (classification.kind !== 'quota') return false
+      settleAccountAttempt('quota', classification.info)
+      if (!failoverEnabled) return false
+      switchingAccount = true
+      const previous = currentTarget
+      state.toolJournal?.stopAccepting()
+      // Provider completion does not own the lifetime of admitted host tasks.
+      await state.toolJournal?.drain(args.signal)
+      if (args.mode === 'maestro') await waitForTurnDelegationsTerminal(args.conversationId, assistantId, args.signal)
+      args.signal.throwIfAborted()
+      persist()
+      archiveAttempt()
+      result = null
+      void state.query?.interrupt().catch(() => undefined)
+      closeQuery()
+      if (sessionId) await retireManagedSession(sessionId, previous)
+      sessionId = ''
+      context = null
+      await runtime?.close()
+      accountAttempt?.release()
+      accountAttempt = undefined
+      const contextual = await args.resolveNextTarget!({ attemptedProviderIds, admit: false })
+      args.signal.throwIfAborted()
+      if (!contextual.ok) throw rotationError(contextual)
+      const nextWindow = safeTokens(contextual.target.contextWindow)
+      if (nextWindow)
+        portableContextWindow = portableContextWindow ? Math.min(portableContextWindow, nextWindow) : nextWindow
+      let transcript = fullTranscript()
+      if (
+        portableContextWindow &&
+        portableContextLoad(portableContextWindow, estimateTextTokens(transcript), 0).shouldCompact
+      ) {
+        const compacted = await args.compactHistory?.({
+          ...contextual.target,
+          contextWindow: portableContextWindow || null,
+        })
+        args.signal.throwIfAborted()
+        if (!compacted?.summary.trim())
+          throw new Error('Claude continuation requires portable compaction, which failed.')
+        const usage = normalizedPortableUsage(compacted.usage)
+        if (usage) portableCompactorUsage.push(usage)
+        if (compacted.runtimeEstimatedCostUsd != null) {
+          portableCompactorRuntimeCostUsd += Math.max(0, compacted.runtimeEstimatedCostUsd)
+          if (usage)
+            for (const key of ['input', 'output', 'cacheRead', 'cacheCreate'] as const)
+              portableCompactorRuntimeCoveredUsage[key] += usage[key]
+        } else if (usage) {
+          for (const key of ['input', 'output', 'cacheRead', 'cacheCreate'] as const)
+            portableCompactorCatalogUsage[key] += usage[key]
+        }
+        apply(
+          {
+            kind: 'compaction',
+            messageId: assistantId,
+            partId: randomUUID(),
+            text: compacted.summary,
+            strategy: 'summary',
+          },
+          true
+        )
+        transcript = fullTranscript()
+        if (portableContextLoad(portableContextWindow, estimateTextTokens(transcript), 0).overflow) {
+          throw new Error('Claude continuation still exceeds the fallback context window after compaction.')
+        }
+      }
+      const admitted = await args.resolveNextTarget!({ attemptedProviderIds, admit: true })
+      if (!admitted.ok) throw rotationError(admitted)
+      if (args.signal.aborted) {
+        settleClaudeAttempt(admitted.target, 'other')
+        args.signal.throwIfAborted()
+      }
+      const window = safeTokens(admitted.target.contextWindow)
+      if (window && portableContextLoad(window, estimateTextTokens(transcript), 0).overflow) {
+        settleClaudeAttempt(admitted.target, 'other')
+        throw new Error('Claude fallback context changed before continuation could start.')
+      }
+      if (attemptedProviderIds.has(admitted.target.providerId)) {
+        settleClaudeAttempt(admitted.target, 'other')
+        throw new Error('Claude fallback returned an account already attempted in this turn.')
+      }
+      currentTarget = admitted.target
+      attemptedProviderIds.add(currentTarget.providerId)
+      accountAttemptSettled = false
+      args = {
+        ...args,
+        manager: currentTarget.manager,
+        accountIdentity: currentTarget.accountIdentity,
+        reasoningEffort: currentTarget.reasoningEffort,
+        fastMode: currentTarget.fastMode,
+      }
+      startAccountAttempt()
+      queryAbortController = new AbortController()
+      state.queryAbortController = queryAbortController
+      await rebuildRuntime()
+      prepareTasks()
+      contextIdentity = createHash('sha256')
+        .update(
+          `${currentTarget.providerId}\0${runtimeModelId}\0${currentTarget.accountIdentity.fingerprint}\0${runtime!.promptHash}`
+        )
+        .digest('hex')
+      nextResume = {}
+      const hasPartial = messages[0].parts.length > 0
+      nextPrompt = buildClaudeSessionPrompt(
+        hasPartial
+          ? {
+              id: randomUUID(),
+              conversationId: args.conversationId,
+              role: 'user',
+              parts: [{ type: 'text', id: randomUUID(), text: PORTABLE_CONTINUE_PROMPT }],
+              createdAt: Date.now(),
+            }
+          : currentUser,
+        hasPartial ? transcript : claudeSeedTranscript(history, undefined),
+        {
+          dropImages: args.dropImages,
+          transientContext: runtime!.transientContext,
+        }
+      )
+      maestroGuarded = false
+      switchingAccount = false
+      args.onFailoverTransition?.({
+        scope: 'root',
+        fromProviderId: previous.providerId,
+        toProviderId: currentTarget.providerId,
+        reason: classification.info.reason,
+        resetsAt: classification.info.resetsAt,
+      })
+      return true
+    }
 
     while (true) {
-      queryClosed = false
-      result = null
-      context = null
-      sessionId = ''
-      sessionAccepted = false
-      intentionalPlanInterruptIssued = false
-      intentionalPlanInterruptCaught = false
-      state.query = args.manager.createQuery({
-        prompt: nextPrompt.prompt,
-        options: buildClaudeChatQueryOptions({
-          abortController: queryAbortController,
-          cwd: args.cwd,
-          modelId: runtimeModelId,
-          reasoningEffort: args.reasoningEffort,
-          fastMode: args.fastMode,
-          systemPrompt: runtime.systemPrompt,
-          bridge: runtime.bridge,
-          disallowedNativeTools: CLAUDE_DISALLOWED_NATIVE_TOOLS,
-          ...nextResume,
-        }),
-      })
-      const activeQuery = state.query
+      const attemptTarget = currentTarget
+      closeQuery()
+      rateLimitInfo = undefined
+      assistantFailure = undefined
       try {
-        const initialized = await activeQuery.initializationResult()
-        args.manager.assertSubscriptionRuntimeAccount(initialized.account, args.accountIdentity)
-        args.manager.assertAccountIdentity(args.accountIdentity)
-        args.signal.throwIfAborted()
-        nextPrompt.release()
-      } catch (error) {
-        nextPrompt.reject(error)
-        throw error
-      }
+        queryClosed = false
+        result = null
+        context = null
+        sessionId = ''
+        sessionAccepted = false
+        streamMapper = createClaudeStreamMapper(assistantId, runtime!.bridge.nameFromSdk)
+        currentAttemptUsageArchived = false
+        queryAbortController = new AbortController()
+        state.queryAbortController = queryAbortController
+        intentionalPlanInterruptIssued = false
+        intentionalPlanInterruptCaught = false
+        state.query = args.manager.createQuery({
+          prompt: nextPrompt.prompt,
+          options: buildClaudeChatQueryOptions({
+            abortController: queryAbortController,
+            cwd: args.cwd,
+            modelId: runtimeModelId,
+            reasoningEffort: args.reasoningEffort,
+            fastMode: args.fastMode,
+            systemPrompt: runtime.systemPrompt,
+            bridge: runtime.bridge,
+            postToolUseHook: runtime.fablePostToolUseHook,
+            disallowedNativeTools: CLAUDE_DISALLOWED_NATIVE_TOOLS,
+            ...nextResume,
+          }),
+        })
+        const activeQuery = state.query
+        try {
+          const initialized = await activeQuery.initializationResult()
+          args.manager.assertSubscriptionRuntimeAccount(initialized.account, args.accountIdentity)
+          args.manager.assertAccountIdentity(args.accountIdentity)
+          args.signal.throwIfAborted()
+          nextPrompt.release()
+        } catch (error) {
+          nextPrompt.reject(error)
+          throw error
+        }
 
-      const contextCapturedMessageIds = new Set<string>()
-      let portableCompactionRequested = false
-      let portableInterruptPromise: Promise<unknown> | null = null
-      const captureContext = async (): Promise<boolean> => {
-        if (runtimeSignal.aborted || queryClosed) return false
-        const measured = await settleWithin(activeQuery.getContextUsage(), 1_500, runtimeSignal)
-        if (!measured) return false
-        const totalTokens = safeTokens(measured.totalTokens)
-        const maxTokens = safeTokens(measured.maxTokens)
-        context = {
-          totalTokens,
-          maxTokens,
-          percentage:
-            Number(measured.percentage) > 0
-              ? Number(measured.percentage)
-              : maxTokens
-                ? (totalTokens / maxTokens) * 100
-                : 0,
-          model: measured.model || runtimeModelId,
+        const contextCapturedMessageIds = new Set<string>()
+        let portableCompactionRequested = false
+        let portableInterruptPromise: Promise<unknown> | null = null
+        const captureContext = async (): Promise<boolean> => {
+          if (runtimeSignal.aborted || queryClosed) return false
+          const measured = await settleWithin(activeQuery.getContextUsage(), 1_500, runtimeSignal)
+          if (!measured) return false
+          const totalTokens = safeTokens(measured.totalTokens)
+          const maxTokens = safeTokens(measured.maxTokens)
+          context = {
+            totalTokens,
+            maxTokens,
+            percentage:
+              Number(measured.percentage) > 0
+                ? Number(measured.percentage)
+                : maxTokens
+                  ? (totalTokens / maxTokens) * 100
+                  : 0,
+            model: measured.model || runtimeModelId,
+          }
+          if (maxTokens) args.onModelContextWindow?.(maxTokens, currentTarget)
+          return true
         }
-        if (maxTokens) args.onModelContextWindow?.(maxTokens)
-        return true
-      }
-      const requestPortableCompaction = (): boolean => {
-        const runtimeContextWindow = context?.maxTokens ?? 0
-        const compactionWindow =
-          portableContextWindow > 0 && runtimeContextWindow > 0
-            ? Math.min(portableContextWindow, runtimeContextWindow)
-            : Math.max(portableContextWindow, runtimeContextWindow)
-        if (
-          portableCompactionRequested ||
-          state.planSubmitted ||
-          inTurnCompactions >= MAX_IN_TURN_COMPACTIONS ||
-          compactionWindow <= 0 ||
-          !args.compactHistory ||
-          !context ||
-          context.totalTokens / compactionWindow < IN_TURN_COMPACT_RATIO
-        ) {
-          return false
+        const requestPortableCompaction = (): boolean => {
+          const runtimeContextWindow = context?.maxTokens ?? 0
+          const compactionWindow =
+            portableContextWindow > 0 && runtimeContextWindow > 0
+              ? Math.min(portableContextWindow, runtimeContextWindow)
+              : Math.max(portableContextWindow, runtimeContextWindow)
+          if (
+            portableCompactionRequested ||
+            state.planSubmitted ||
+            inTurnCompactions >= MAX_IN_TURN_COMPACTIONS ||
+            compactionWindow <= 0 ||
+            !args.compactHistory ||
+            !context ||
+            context.totalTokens / compactionWindow < IN_TURN_COMPACT_RATIO
+          ) {
+            return false
+          }
+          // compactHistory reads the durable conversation. Publish the provider's folded prefix first.
+          persist()
+          portableCompactionRequested = true
+          portableInterruptPromise = activeQuery.interrupt().catch(() => undefined)
+          closeQuery()
+          return true
         }
-        // compactHistory reads the durable conversation. Publish the provider's folded prefix first.
-        persist()
-        portableCompactionRequested = true
-        portableInterruptPromise = activeQuery.interrupt().catch(() => undefined)
-        closeQuery()
-        return true
-      }
-      streamMapper = createClaudeStreamMapper(assistantId, runtime.bridge.nameFromSdk)
-      currentAttemptUsageArchived = false
-      const applyMappedEvents = (events: readonly ChatStreamEvent[]): void => {
-        for (const event of events) {
-          apply(event, event.kind === 'tool-call' && event.toolName === 'ask_question')
-        }
-      }
-      const ensureSession = (message: SDKMessage): void => {
-        if (!('session_id' in message) || !message.session_id || sessionId) return
-        sessionId = message.session_id
-        // Isolated: create a durable tombstone as soon as the remote ID exists; finally hard-deletes it.
-        if (args.ephemeralSession) {
-          queueClaudeSessionCleanup(args.conversationId, sessionId, args.cwd, args.manager.accountId ?? null)
-        }
-        sessionAccepted = args.onSessionReady?.(sessionId) ?? true
-        if (!sessionAccepted) {
-          void activeQuery.interrupt().catch(() => undefined)
-          throw new Error('Claude session was discarded because the conversation is being closed.')
-        }
-      }
-      const ensureProgressTool = (toolCallId: string, toolName: string, input: unknown): void => {
-        if (!currentToolState(toolCallId)) {
-          const normalized = runtime!.bridge.nameFromSdk(toolName)
-          apply({ kind: 'tool-input-start', messageId: assistantId, toolCallId, toolName: normalized })
-          apply(
-            { kind: 'tool-call', messageId: assistantId, toolCallId, toolName: normalized, input },
-            normalized === 'ask_question'
-          )
-          apply({ kind: 'tool-state', messageId: assistantId, toolCallId, state: { status: 'running' } })
-        }
-      }
-      const handleUser = async (message: Extract<SDKMessage, { type: 'user' }>): Promise<boolean> => {
-        const mapped = streamMapper!.pushUser(message, state.subagentRuns, runtime!.bridge.takeToolOutput)
-        let toolResultIndex = 0
-        let foldedToolResult = false
-        for (const event of mapped.events) {
-          const finalToolState =
-            event.kind === 'tool-state' && (event.state.status === 'completed' || event.state.status === 'error')
-          apply(event, finalToolState)
-          if (!finalToolState) continue
-          const toolResult = mapped.toolResults[toolResultIndex++]
-          if (!toolResult) continue
-          foldedToolResult = true
-          state.subagentRuns.delete(toolResult.toolCallId)
-          if (toolResult.toolCallId === state.planToolCallId) {
-            state.planResultAcknowledged = !toolResult.isError
-            if (state.planAcknowledgementTimer) {
-              clearTimeout(state.planAcknowledgementTimer)
-              state.planAcknowledgementTimer = null
-            }
-            if (state.planResultAcknowledged) {
-              // getContextUsage is a live control request. Capture it before the
-              // intentional interrupt tears down the Claude Code transport.
-              await captureContext()
-              intentionalPlanInterruptIssued = true
-              // The matching tool result is now folded and persisted. Interrupting from
-              // this boundary preserves a resumable provider-native transcript.
-              void activeQuery.interrupt().catch(() => undefined)
-              planInterruptCloseTimer = setTimeout(closeQuery, 2_000)
-              planInterruptCloseTimer.unref?.()
-            }
+        streamMapper = createClaudeStreamMapper(assistantId, runtime.bridge.nameFromSdk)
+        currentAttemptUsageArchived = false
+        const applyMappedEvents = (events: readonly ChatStreamEvent[]): void => {
+          for (const event of events) {
+            apply(event, event.kind === 'tool-call' && event.toolName === 'ask_question')
           }
         }
-        if (!foldedToolResult || intentionalPlanInterruptIssued || !(await captureContext())) return false
-        return requestPortableCompaction()
-      }
-
-      try {
-        for await (const sdkMessage of activeQuery) {
-          ensureSession(sdkMessage)
-          if (sdkMessage.type === 'stream_event' && !sdkMessage.parent_tool_use_id) {
-            applyMappedEvents(streamMapper.pushPartial(sdkMessage))
-          } else if (sdkMessage.type === 'assistant' && !sdkMessage.parent_tool_use_id) {
-            applyMappedEvents(streamMapper.pushAssistant(sdkMessage))
-            if (
-              sdkMessage.message.stop_reason != null &&
-              sdkMessage.message.stop_reason !== 'tool_use' &&
-              !contextCapturedMessageIds.has(sdkMessage.message.id) &&
-              (await captureContext())
-            ) {
-              contextCapturedMessageIds.add(sdkMessage.message.id)
-              if (requestPortableCompaction()) break
-            }
-          } else if (sdkMessage.type === 'user' && !sdkMessage.parent_tool_use_id) {
-            if (await handleUser(sdkMessage)) break
-          } else if (sdkMessage.type === 'tool_progress' && !sdkMessage.parent_tool_use_id) {
-            const existingState = currentToolState(sdkMessage.tool_use_id)
-            if (existingState?.status === 'completed' || existingState?.status === 'error') continue
-            const call = streamMapper.tool(sdkMessage.tool_use_id)
-            ensureProgressTool(
-              sdkMessage.tool_use_id,
-              runtime.bridge.nameFromSdk(sdkMessage.tool_name),
-              call?.input ?? {}
+        const ensureSession = (message: SDKMessage): void => {
+          if (!('session_id' in message) || !message.session_id || sessionId) return
+          sessionId = message.session_id
+          // Isolated: create a durable tombstone as soon as the remote ID exists; finally hard-deletes it.
+          if (args.ephemeralSession) {
+            queueClaudeSessionCleanup(args.conversationId, sessionId, args.cwd, args.manager.accountId ?? null)
+          }
+          sessionAccepted = args.onSessionReady?.(sessionId, attemptTarget) ?? true
+          if (!sessionAccepted) {
+            void activeQuery.interrupt().catch(() => undefined)
+            throw new Error('Claude session was discarded because the conversation is being closed.')
+          }
+        }
+        const ensureProgressTool = (toolCallId: string, toolName: string, input: unknown): void => {
+          if (!currentToolState(toolCallId)) {
+            const normalized = runtime!.bridge.nameFromSdk(toolName)
+            apply({ kind: 'tool-input-start', messageId: assistantId, toolCallId, toolName: normalized })
+            apply(
+              { kind: 'tool-call', messageId: assistantId, toolCallId, toolName: normalized, input },
+              normalized === 'ask_question'
             )
-            apply({
-              kind: 'tool-state',
-              messageId: assistantId,
-              toolCallId: sdkMessage.tool_use_id,
-              state: {
-                status: 'running',
-                output: `${runtime.bridge.nameFromSdk(sdkMessage.tool_name)} running (${sdkMessage.elapsed_time_seconds}s)`,
-                ...(state.subagentRuns.get(sdkMessage.tool_use_id)
-                  ? { sub: state.subagentRuns.get(sdkMessage.tool_use_id) }
-                  : {}),
-              },
-            })
-          } else if (sdkMessage.type === 'tool_use_summary') {
-            for (const toolCallId of sdkMessage.preceding_tool_use_ids) {
-              const existingState = currentToolState(toolCallId)
+            apply({ kind: 'tool-state', messageId: assistantId, toolCallId, state: { status: 'running' } })
+          }
+        }
+        const handleUser = async (message: Extract<SDKMessage, { type: 'user' }>): Promise<boolean> => {
+          const mapped = streamMapper!.pushUser(message, state.subagentRuns, runtime!.bridge.takeToolOutput)
+          let toolResultIndex = 0
+          let foldedToolResult = false
+          for (const event of mapped.events) {
+            const finalToolState =
+              event.kind === 'tool-state' && (event.state.status === 'completed' || event.state.status === 'error')
+            apply(event, finalToolState)
+            if (!finalToolState) continue
+            const toolResult = mapped.toolResults[toolResultIndex++]
+            if (!toolResult) continue
+            foldedToolResult = true
+            state.subagentRuns.delete(toolResult.toolCallId)
+            if (toolResult.toolCallId === state.planToolCallId) {
+              state.planResultAcknowledged = !toolResult.isError
+              if (state.planAcknowledgementTimer) {
+                clearTimeout(state.planAcknowledgementTimer)
+                state.planAcknowledgementTimer = null
+              }
+              if (state.planResultAcknowledged) {
+                // getContextUsage is a live control request. Capture it before the
+                // intentional interrupt tears down the Claude Code transport.
+                await captureContext()
+                intentionalPlanInterruptIssued = true
+                // The matching tool result is now folded and persisted. Interrupting from
+                // this boundary preserves a resumable provider-native transcript.
+                void activeQuery.interrupt().catch(() => undefined)
+                planInterruptCloseTimer = setTimeout(closeQuery, 2_000)
+                planInterruptCloseTimer.unref?.()
+              }
+            }
+          }
+          if (!foldedToolResult || intentionalPlanInterruptIssued || !(await captureContext())) return false
+          return requestPortableCompaction()
+        }
+
+        const observeQuotaFailure = (error: unknown): boolean => {
+          const quota = classifyClaudeQuotaFailure(error, rateLimitInfo)
+          if (quota.kind !== 'quota' || state.planSubmitted) return false
+          // SDK iterator teardown can itself wait for MCP calls. Publish rejection
+          // as soon as its result arrives so those children can select another account.
+          settleAccountAttempt('quota', quota.info)
+          state.toolJournal?.stopAccepting()
+          return failoverEnabled
+        }
+        try {
+          for await (const sdkMessage of activeQuery) {
+            ensureSession(sdkMessage)
+            if (sdkMessage.type === 'rate_limit_event') {
+              rateLimitInfo = sdkMessage.rate_limit_info
+              if (observeQuotaFailure(null)) break
+            }
+            if (sdkMessage.type === 'stream_event' && !sdkMessage.parent_tool_use_id) {
+              applyMappedEvents(streamMapper.pushPartial(sdkMessage))
+            } else if (sdkMessage.type === 'assistant' && !sdkMessage.parent_tool_use_id) {
+              if (sdkMessage.error) assistantFailure = sdkMessage
+              const mapped = streamMapper.pushAssistant(sdkMessage)
+              if (sdkMessage.error && observeQuotaFailure(sdkMessage)) break
+              // Local quota diagnostics are not model prose; a later rate event may
+              // confirm them. Preserve usage but keep intermediate errors out of the bubble.
+              if (sdkMessage.error !== 'rate_limit' && sdkMessage.error !== 'billing_error') applyMappedEvents(mapped)
+              if (
+                sdkMessage.message.stop_reason != null &&
+                sdkMessage.message.stop_reason !== 'tool_use' &&
+                !contextCapturedMessageIds.has(sdkMessage.message.id) &&
+                (await captureContext())
+              ) {
+                contextCapturedMessageIds.add(sdkMessage.message.id)
+                if (requestPortableCompaction()) break
+              }
+            } else if (sdkMessage.type === 'user' && !sdkMessage.parent_tool_use_id) {
+              if (await handleUser(sdkMessage)) break
+            } else if (sdkMessage.type === 'tool_progress' && !sdkMessage.parent_tool_use_id) {
+              const existingState = currentToolState(sdkMessage.tool_use_id)
               if (existingState?.status === 'completed' || existingState?.status === 'error') continue
+              const call = streamMapper.tool(sdkMessage.tool_use_id)
+              ensureProgressTool(
+                sdkMessage.tool_use_id,
+                runtime.bridge.nameFromSdk(sdkMessage.tool_name),
+                call?.input ?? {}
+              )
               apply({
                 kind: 'tool-state',
                 messageId: assistantId,
-                toolCallId,
+                toolCallId: sdkMessage.tool_use_id,
                 state: {
-                  status: 'completed',
-                  output: clipPersistedToolOutput(sdkMessage.summary),
-                  ...(state.subagentRuns.get(toolCallId) ? { sub: state.subagentRuns.get(toolCallId) } : {}),
+                  status: 'running',
+                  output: `${runtime.bridge.nameFromSdk(sdkMessage.tool_name)} running (${sdkMessage.elapsed_time_seconds}s)`,
+                  ...(state.subagentRuns.get(sdkMessage.tool_use_id)
+                    ? { sub: state.subagentRuns.get(sdkMessage.tool_use_id) }
+                    : {}),
                 },
               })
+            } else if (sdkMessage.type === 'tool_use_summary') {
+              for (const toolCallId of sdkMessage.preceding_tool_use_ids) {
+                const existingState = currentToolState(toolCallId)
+                if (existingState?.status === 'completed' || existingState?.status === 'error') continue
+                apply({
+                  kind: 'tool-state',
+                  messageId: assistantId,
+                  toolCallId,
+                  state: {
+                    status: 'completed',
+                    output: clipPersistedToolOutput(sdkMessage.summary),
+                    ...(state.subagentRuns.get(toolCallId) ? { sub: state.subagentRuns.get(toolCallId) } : {}),
+                  },
+                })
+              }
+            } else if (sdkMessage.type === 'result') {
+              result = sdkMessage
+              if (sdkMessage.subtype !== 'success' && observeQuotaFailure(assistantFailure ?? sdkMessage)) break
             }
-          } else if (sdkMessage.type === 'result') {
-            result = sdkMessage
+          }
+        } catch (error) {
+          if (portableCompactionRequested && !args.signal.aborted) {
+            // Interrupting an overfull provider attempt can end in a normal SDK transport diagnostic.
+          } else if (
+            intentionalPlanInterruptIssued &&
+            state.planSubmitted &&
+            state.planResultAcknowledged &&
+            !args.signal.aborted &&
+            isIntentionalPlanInterruptDiagnostic(error)
+          ) {
+            intentionalPlanInterruptCaught = true
+            chatDiag({
+              kind: 'claude-plan-interrupt-terminal',
+              runtime: 'claude-subscription',
+              conv: args.conversationId,
+              resultSubtype: result?.subtype ?? null,
+            })
+          } else {
+            throw error
           }
         }
-      } catch (error) {
-        if (portableCompactionRequested && !args.signal.aborted) {
-          // Interrupting an overfull provider attempt can end in a normal SDK transport diagnostic.
-        } else if (
-          intentionalPlanInterruptIssued &&
-          state.planSubmitted &&
-          state.planResultAcknowledged &&
-          !args.signal.aborted &&
-          isIntentionalPlanInterruptDiagnostic(error)
-        ) {
-          intentionalPlanInterruptCaught = true
-          chatDiag({
-            kind: 'claude-plan-interrupt-terminal',
-            runtime: 'claude-subscription',
-            conv: args.conversationId,
-            resultSubtype: result?.subtype ?? null,
-          })
-        } else {
-          throw error
-        }
-      }
 
-      if (!portableCompactionRequested || args.signal.aborted || state.planSubmitted) {
-        const pendingGuard =
-          args.mode === 'maestro' &&
-          !maestroGuarded &&
-          !args.signal.aborted &&
-          !state.planSubmitted &&
-          unobservedTurnDelegations(args.conversationId, assistantId).length > 0
-        if (pendingGuard) {
-          const attemptUsage = aggregateClaudeUsage(streamMapper.state().assistantUsageByMessageId.values())
-          if (attemptUsage) completedAttemptUsage.push(attemptUsage)
-          currentAttemptUsageArchived = true
-          const resumeSessionId = sessionId
-          const delegations = await waitForTurnDelegationsTerminal(args.conversationId, assistantId, args.signal)
-          for (const delegation of delegations) markDelegationObserved(delegation.id)
-          persist()
-          const continuationTranscript = renderTranscript([...history, messages[0]], {
-            maxToolOutputChars: 16_000,
-            maxChars: 800_000,
-          })
-          const guardMessage: ChatMessage = {
-            id: randomUUID(),
-            conversationId: args.conversationId,
-            role: 'user',
-            internal: true,
-            parts: [
-              {
-                type: 'text',
-                id: randomUUID(),
-                text:
-                  'Host guard: delegated sessions have settled. Inspect any needed transcript, reconcile every ' +
-                  `result, and only then produce the final answer. Sessions: ${JSON.stringify(
-                    delegations.map((entry) => ({
-                      sessionId: entry.id,
-                      agent: entry.agentName,
-                      status: entry.status,
-                      tools: entry.toolNames,
-                      files: entry.files,
-                      tests: entry.tests,
-                      error: entry.error,
-                    }))
-                  )}`,
-              },
-            ],
-            createdAt: Date.now(),
-          }
-          nextPrompt = buildClaudeSessionPrompt(guardMessage, continuationTranscript, {
-            dropImages: args.dropImages,
-          })
-          nextResume = resumeSessionId ? { resume: resumeSessionId } : {}
-          maestroGuarded = true
+        if (result?.subtype === 'success') await state.toolJournal?.drain(args.signal)
+        if (
+          !portableCompactionRequested &&
+          result?.subtype !== 'success' &&
+          (await performFailover(assistantFailure ?? result))
+        )
           continue
-        }
-        break
-      }
-      if (portableInterruptPromise) await settleWithin(portableInterruptPromise, 2_000, args.signal)
-      persist()
-      const compactionContext = context as ClaudeContextSnapshot | null
 
-      let compacted: Awaited<ReturnType<NonNullable<RunClaudeChatArgs['compactHistory']>>> = null
-      try {
-        compacted = await args.compactHistory!()
-      } catch {
-        compacted = null
-      }
-      const summary = compacted?.summary.trim()
-      if (!compacted || !summary) {
-        fatal = 'Claude portable intra-turn compaction failed.'
+        if (!portableCompactionRequested || args.signal.aborted || state.planSubmitted) {
+          const pendingGuard =
+            args.mode === 'maestro' &&
+            !maestroGuarded &&
+            !args.signal.aborted &&
+            !state.planSubmitted &&
+            unobservedTurnDelegations(args.conversationId, assistantId).length > 0
+          if (pendingGuard) {
+            const attemptUsage = aggregateClaudeUsage(streamMapper.state().assistantUsageByMessageId.values())
+            if (attemptUsage) completedAttemptUsage.push(attemptUsage)
+            currentAttemptUsageArchived = true
+            const resumeSessionId = sessionId
+            const delegations = await waitForTurnDelegationsTerminal(args.conversationId, assistantId, args.signal)
+            for (const delegation of delegations) markDelegationObserved(delegation.id)
+            persist()
+            const continuationTranscript = renderTranscript([...history, messages[0]], {
+              maxToolOutputChars: 16_000,
+              maxChars: 800_000,
+            })
+            const guardMessage: ChatMessage = {
+              id: randomUUID(),
+              conversationId: args.conversationId,
+              role: 'user',
+              internal: true,
+              parts: [
+                {
+                  type: 'text',
+                  id: randomUUID(),
+                  text:
+                    'Host guard: delegated sessions have settled. Inspect any needed transcript, reconcile every ' +
+                    `result, and only then produce the final answer. Sessions: ${JSON.stringify(
+                      delegations.map((entry) => ({
+                        sessionId: entry.id,
+                        agent: entry.agentName,
+                        status: entry.status,
+                        tools: entry.toolNames,
+                        files: entry.files,
+                        tests: entry.tests,
+                        error: entry.error,
+                      }))
+                    )}`,
+                },
+              ],
+              createdAt: Date.now(),
+            }
+            nextPrompt = buildClaudeSessionPrompt(guardMessage, continuationTranscript, {
+              dropImages: args.dropImages,
+            })
+            nextResume = resumeSessionId ? { resume: resumeSessionId } : {}
+            maestroGuarded = true
+            continue
+          }
+          break
+        }
+        if (portableInterruptPromise) await settleWithin(portableInterruptPromise, 2_000, args.signal)
+        // Summaries create an irreversible transcript boundary. Fold every admitted
+        // tool first, including results that never received a provider ACK.
+        state.toolJournal?.stopAccepting()
+        await state.toolJournal?.drain(args.signal)
+        if (args.mode === 'maestro') await waitForTurnDelegationsTerminal(args.conversationId, assistantId, args.signal)
+        persist()
+        const compactionContext = context as ClaudeContextSnapshot | null
+
+        let compacted: Awaited<ReturnType<NonNullable<RunClaudeChatArgs['compactHistory']>>> = null
+        try {
+          compacted = await args.compactHistory!()
+        } catch (error) {
+          recordFailedHelper(error)
+          compacted = null
+        }
+        const summary = compacted?.summary.trim()
+        if (!compacted || !summary) {
+          fatal = 'Claude portable intra-turn compaction failed.'
+          chatDiag({
+            kind: 'claude-subscription-in-turn-compact-failed',
+            compacts: inTurnCompactions,
+            contextInput: compactionContext?.totalTokens ?? 0,
+            contextWindow:
+              portableContextWindow > 0 && (compactionContext?.maxTokens ?? 0) > 0
+                ? Math.min(portableContextWindow, compactionContext?.maxTokens ?? 0)
+                : Math.max(portableContextWindow, compactionContext?.maxTokens ?? 0),
+            model: runtimeModelId,
+            conv: args.conversationId,
+          })
+          break
+        }
+
+        const attemptUsage = aggregateClaudeUsage(streamMapper.state().assistantUsageByMessageId.values())
+        const compactorUsage = normalizedPortableUsage(compacted.usage)
+        const markerUsage = aggregateClaudeUsage([
+          ...completedAttemptUsage,
+          ...portableCompactorUsage,
+          ...(attemptUsage ? [attemptUsage] : []),
+          ...(compactorUsage ? [compactorUsage] : []),
+        ])
+        // Compaction cost: add complete native estimates (tokens marked as covered); token-only usage
+        // uses the catalog (main does not cover it).
+        if (compacted.runtimeEstimatedCostUsd != null) {
+          portableCompactorRuntimeCostUsd += Math.max(0, compacted.runtimeEstimatedCostUsd)
+          if (compactorUsage) {
+            portableCompactorRuntimeCoveredUsage.input += compactorUsage.input
+            portableCompactorRuntimeCoveredUsage.output += compactorUsage.output
+            portableCompactorRuntimeCoveredUsage.cacheRead += compactorUsage.cacheRead
+            portableCompactorRuntimeCoveredUsage.cacheCreate += compactorUsage.cacheCreate
+          }
+        } else if (compactorUsage) {
+          portableCompactorCatalogUsage.input += compactorUsage.input
+          portableCompactorCatalogUsage.output += compactorUsage.output
+          portableCompactorCatalogUsage.cacheRead += compactorUsage.cacheRead
+          portableCompactorCatalogUsage.cacheCreate += compactorUsage.cacheCreate
+        }
+        const compactorAux = {
+          runtimeCostUsd: portableCompactorRuntimeCostUsd,
+          catalogTokens: portableCompactorCatalogUsage,
+          runtimeCoveredTokens: portableCompactorRuntimeCoveredUsage,
+        }
+        inTurnCompactions += 1
+        applyWithUsage(
+          {
+            kind: 'compaction' as const,
+            messageId: assistantId,
+            partId: randomUUID(),
+            text: summary,
+            strategy: 'summary' as const,
+          },
+          usageFromResult(
+            null,
+            compactionContext,
+            [...subagentUsage.values()],
+            contextIdentity,
+            markerUsage,
+            markerUsage,
+            compactorAux
+          )
+        )
         chatDiag({
-          kind: 'claude-subscription-in-turn-compact-failed',
+          kind: 'claude-subscription-in-turn-compact',
           compacts: inTurnCompactions,
           contextInput: compactionContext?.totalTokens ?? 0,
           contextWindow:
@@ -1343,96 +1859,57 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
           model: runtimeModelId,
           conv: args.conversationId,
         })
-        break
-      }
+        if (attemptUsage) completedAttemptUsage.push(attemptUsage)
+        if (compactorUsage) portableCompactorUsage.push(compactorUsage)
+        currentAttemptUsageArchived = true
 
-      const attemptUsage = aggregateClaudeUsage(streamMapper.state().assistantUsageByMessageId.values())
-      const compactorUsage = normalizedPortableUsage(compacted.usage)
-      const markerUsage = aggregateClaudeUsage([
-        ...completedAttemptUsage,
-        ...portableCompactorUsage,
-        ...(attemptUsage ? [attemptUsage] : []),
-        ...(compactorUsage ? [compactorUsage] : []),
-      ])
-      // Compaction cost: add complete native estimates (tokens marked as covered); token-only usage
-      // uses the catalog (main does not cover it).
-      if (compacted.runtimeEstimatedCostUsd != null) {
-        portableCompactorRuntimeCostUsd += Math.max(0, compacted.runtimeEstimatedCostUsd)
-        if (compactorUsage) {
-          portableCompactorRuntimeCoveredUsage.input += compactorUsage.input
-          portableCompactorRuntimeCoveredUsage.output += compactorUsage.output
-          portableCompactorRuntimeCoveredUsage.cacheRead += compactorUsage.cacheRead
-          portableCompactorRuntimeCoveredUsage.cacheCreate += compactorUsage.cacheCreate
+        // A portable summary makes the provider-native history stale. Never resume this session again.
+        const supersededSessionId = sessionId
+        await retireManagedSession(supersededSessionId)
+        // Isolated: NEVER retire the conversation's MAIN binding (existing); retire only the ephemeral session.
+        if (!args.ephemeralSession && existing && existing.sessionId !== supersededSessionId) {
+          await retireManagedSession(
+            existing.sessionId,
+            existing.accountId === currentTarget.accountId
+              ? currentTarget
+              : {
+                  ...currentTarget,
+                  accountId: existing.accountId,
+                  manager: getClaudeSubscriptionManager(existing.accountId),
+                }
+          )
         }
-      } else if (compactorUsage) {
-        portableCompactorCatalogUsage.input += compactorUsage.input
-        portableCompactorCatalogUsage.output += compactorUsage.output
-        portableCompactorCatalogUsage.cacheRead += compactorUsage.cacheRead
-        portableCompactorCatalogUsage.cacheCreate += compactorUsage.cacheCreate
-      }
-      const compactorAux = {
-        runtimeCostUsd: portableCompactorRuntimeCostUsd,
-        catalogTokens: portableCompactorCatalogUsage,
-        runtimeCoveredTokens: portableCompactorRuntimeCoveredUsage,
-      }
-      inTurnCompactions += 1
-      applyWithUsage(
-        {
-          kind: 'compaction' as const,
-          messageId: assistantId,
-          partId: randomUUID(),
-          text: summary,
-          strategy: 'summary' as const,
-        },
-        usageFromResult(
-          null,
-          compactionContext,
-          [...subagentUsage.values()],
-          contextIdentity,
-          markerUsage,
-          markerUsage,
-          compactorAux
-        )
-      )
-      chatDiag({
-        kind: 'claude-subscription-in-turn-compact',
-        compacts: inTurnCompactions,
-        contextInput: compactionContext?.totalTokens ?? 0,
-        contextWindow:
-          portableContextWindow > 0 && (compactionContext?.maxTokens ?? 0) > 0
-            ? Math.min(portableContextWindow, compactionContext?.maxTokens ?? 0)
-            : Math.max(portableContextWindow, compactionContext?.maxTokens ?? 0),
-        model: runtimeModelId,
-        conv: args.conversationId,
-      })
-      if (attemptUsage) completedAttemptUsage.push(attemptUsage)
-      if (compactorUsage) portableCompactorUsage.push(compactorUsage)
-      currentAttemptUsageArchived = true
+        if (args.signal.aborted) break
+        await runtime.close()
+        await rebuildRuntime()
+        prepareTasks()
+        contextIdentity = createHash('sha256')
+          .update(
+            `${currentTarget.providerId}\0${runtimeModelId}\0${currentTarget.accountIdentity.fingerprint}\0${runtime!.promptHash}`
+          )
+          .digest('hex')
 
-      // A portable summary makes the provider-native history stale. Never resume this session again.
-      const supersededSessionId = sessionId
-      await retireManagedSession(supersededSessionId)
-      // Isolated: NEVER retire the conversation's MAIN binding (existing); retire only the ephemeral session.
-      if (!args.ephemeralSession && existing && existing.sessionId !== supersededSessionId) {
-        await retireManagedSession(existing.sessionId)
+        const continuationTranscript = renderTranscript([...history, messages[0]], {
+          maxToolOutputChars: 16_000,
+          maxChars: 800_000,
+        })
+        const continueMessage: ChatMessage = {
+          id: randomUUID(),
+          conversationId: args.conversationId,
+          role: 'user',
+          parts: [{ type: 'text', id: randomUUID(), text: PORTABLE_CONTINUE_PROMPT }],
+          createdAt: Date.now(),
+        }
+        nextPrompt = buildClaudeSessionPrompt(continueMessage, continuationTranscript, {
+          dropImages: args.dropImages,
+          transientContext: runtime.transientContext,
+        })
+        nextResume = {}
+      } catch (error) {
+        nextPrompt.reject(error)
+        if (await performFailover(error)) continue
+        throw error
       }
-      if (args.signal.aborted) break
-
-      const continuationTranscript = renderTranscript([...history, messages[0]], {
-        maxToolOutputChars: 16_000,
-        maxChars: 800_000,
-      })
-      const continueMessage: ChatMessage = {
-        id: randomUUID(),
-        conversationId: args.conversationId,
-        role: 'user',
-        parts: [{ type: 'text', id: randomUUID(), text: PORTABLE_CONTINUE_PROMPT }],
-        createdAt: Date.now(),
-      }
-      nextPrompt = buildClaudeSessionPrompt(continueMessage, continuationTranscript, {
-        dropImages: args.dropImages,
-      })
-      nextResume = {}
     }
 
     const mapperState = streamMapper.state()
@@ -1471,7 +1948,7 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
         : resolvedContext.percentage
     }
     context = resolvedContext
-    if (context?.maxTokens) args.onModelContextWindow?.(context.maxTokens)
+    if (context?.maxTokens) args.onModelContextWindow?.(context.maxTokens, currentTarget)
     const planAcknowledgementMissing = state.planSubmitted && !state.planResultAcknowledged
     const terminalToolLabel = args.reviewerRuntime ? 'review decision' : 'staged plan'
     if (planAcknowledgementMissing && state.planToolCallId) {
@@ -1523,18 +2000,18 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
         runtimeCoveredTokens: portableCompactorRuntimeCoveredUsage,
       }
     )
-    if (normalizedUsage) {
+    if (finalAttemptUsage) {
       recordModelCallUsage({
         runtime: 'claude-subscription',
-        providerId: args.selection.providerId,
+        providerId: currentTarget.providerId,
         modelId: servedModelMismatch?.served ?? runtimeModelId,
         conversationId: args.conversationId,
         usage: {
-          input: normalizedUsage.input,
-          output: normalizedUsage.output,
-          cacheRead: normalizedUsage.cacheRead,
-          cacheCreate: normalizedUsage.cacheCreate,
-          totalInput: normalizedUsage.totalInput,
+          input: finalAttemptUsage.input,
+          output: finalAttemptUsage.output,
+          cacheRead: finalAttemptUsage.cacheRead,
+          cacheCreate: finalAttemptUsage.cacheCreate,
+          totalInput: finalAttemptUsage.totalInput,
         },
       })
     }
@@ -1581,6 +2058,7 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
         sessionId,
       }
     } else {
+      settleAccountAttempt('success')
       applyWithUsage(
         {
           kind: 'finish' as const,
@@ -1598,10 +2076,16 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
       !args.signal.aborted &&
       !fatal &&
       !args.ephemeralSession &&
-      (args.canPersistSession?.() ?? true)
+      (args.canPersistSession?.(currentTarget) ?? true)
     ) {
       const userUuid = result?.subtype === 'success' ? (result.user_message_uuid ?? null) : null
-      if (!inTurnCompactions && resolution.forkSession && existing && sessionId !== existing.sessionId) {
+      if (
+        attemptedProviderIds.size === 1 &&
+        !inTurnCompactions &&
+        resolution.forkSession &&
+        existing &&
+        sessionId !== existing.sessionId
+      ) {
         reassignClaudeMessageMappings(args.conversationId, existing.sessionId, sessionId)
       }
       putClaudeMessageMapping({
@@ -1651,6 +2135,7 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
       sessionId,
     }
   } catch (error) {
+    recordFailedHelper(error)
     if (terminalCommitted) {
       coalescer.flush()
       return {
@@ -1675,7 +2160,11 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
     const fallbackMainUsage = currentAttemptUsageArchived
       ? undefined
       : aggregateClaudeUsage(streamMapper?.state().assistantUsageByMessageId.values() ?? [])
-    const catchFinalAttemptUsage = result ? normalizeClaudeUsage(result.usage) : fallbackMainUsage
+    const catchFinalAttemptUsage = currentAttemptUsageArchived
+      ? undefined
+      : result
+        ? normalizeClaudeUsage(result.usage)
+        : fallbackMainUsage
     const catchNormalizedUsage = aggregateClaudeUsage([
       ...completedAttemptUsage,
       ...portableCompactorUsage,
@@ -1735,6 +2224,9 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
           kind: 'error' as const,
           messageId: assistantId,
           message: fatal ?? claudeRuntimeErrorMessage(error, runtimeModelId),
+          ...(isRecord(error) && error.code === 'claude-accounts-exhausted'
+            ? { code: 'claude-accounts-exhausted' as const }
+            : {}),
           responseDurationMs: responseDurationMs(responseStartedAt),
         },
         catchUsage
@@ -1746,6 +2238,12 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
       sessionId,
     }
   } finally {
+    settleAccountAttempt('other')
+    args.signal.removeEventListener('abort', onAbort)
+    state.toolJournal?.stopAccepting()
+    hostAbortController.abort(new Error('Claude host turn ended.'))
+    // Keep physical ownership until even cancellation-ignoring callbacks have settled.
+    await state.toolJournal?.drain(new AbortController().signal)
     state.subagentRuns.clear()
     if (state.planAcknowledgementTimer) clearTimeout(state.planAcknowledgementTimer)
     if (abortCloseTimer) clearTimeout(abortCloseTimer)
@@ -1754,6 +2252,7 @@ export async function runClaudeChat(args: RunClaudeChatArgs): Promise<RunClaudeC
     closeQuery()
     if (sessionId && !sessionPersisted && !retiredSessionIds.has(sessionId)) await retireManagedSession(sessionId)
     await runtime?.close().catch(() => undefined)
+    accountAttempt?.release()
     if (dirty) persist()
     coalescer.flush()
     coalescer.dispose()
@@ -1773,10 +2272,14 @@ export interface CompactClaudeSessionResult {
   context?: ClaudeContextSnapshot
   usage?: NormalizedClaudeUsage & { runtimeEstimatedCostUsd?: number }
   incompatible?: boolean
+  exhaustion?: MarkExhaustedInfo
+  portable?: boolean
 }
 
 /** Requests the runtime's native /compact command for the exact persisted session. */
 export async function compactClaudeSession(args: CompactClaudeSessionArgs): Promise<CompactClaudeSessionResult> {
+  const operationController = new AbortController()
+  args = { ...args, signal: AbortSignal.any([args.signal, operationController.signal]) }
   args.signal.throwIfAborted()
   args.manager.assertAccountIdentity(args.accountIdentity)
   // `/compact` intentionally uses the command-string channel. Prove the
@@ -1830,12 +2333,89 @@ export async function compactClaudeSession(args: CompactClaudeSessionArgs): Prom
   let boundary: SDKCompactBoundaryMessage | null = null
   let result: SDKResultMessage | null = null
   let context: ClaudeContextSnapshot | undefined
+  let rateLimitInfo: SDKRateLimitInfo | undefined
+  let recoveringQuota = false
+  const partialUsage = new Map<string, NormalizedClaudeUsage>()
+  let nativeAttempt: ReturnType<typeof beginClaudeAttempt> | undefined
+
+  const recoverQuota = async (error: unknown): Promise<CompactClaudeSessionResult | null> => {
+    if (args.signal.aborted || args.frozenResolvedModelId || recoveringQuota) return null
+    const classification = classifyClaudeQuotaFailure(error, rateLimitInfo)
+    if (classification.kind !== 'quota') return null
+    recoveringQuota = true
+    args.manager.assertAccountIdentity(args.accountIdentity)
+    query?.close()
+    query = null
+    retireClaudeSessionBinding(args.conversationId, binding.sessionId)
+    // Retirement preserves its original account in the cleanup queue.
+    settleClaudeAttempt(
+      args.initialTarget ?? {
+        providerId: args.selection.providerId,
+        accountId: binding.accountId,
+        manager: args.manager,
+        accountIdentity: args.accountIdentity,
+        model: { value: binding.modelId, displayName: binding.modelId, description: '' },
+        runtimeModelId: binding.modelId,
+        reasoningEffort: args.reasoningEffort,
+        fastMode: args.fastMode === true,
+        maestrlyUltra: args.maestrlyUltra === true,
+        contextWindow: binding.context?.maxTokens ?? null,
+      },
+      'quota',
+      classification.info
+    )
+    const nativeUsage = result ? normalizeClaudeUsage(result.usage) : aggregateClaudeUsage(partialUsage.values())
+    if (nativeUsage)
+      recordModelCallUsage({
+        runtime: 'claude-subscription',
+        providerId: args.initialTarget?.providerId ?? args.selection.providerId,
+        modelId: binding.modelId,
+        conversationId: args.conversationId,
+        usage: nativeUsage,
+      })
+    const summary = await args.compactHistory?.()
+    const combinedUsage = aggregateClaudeUsage([
+      ...(nativeUsage ? [nativeUsage] : []),
+      ...(summary?.usage ? [normalizedPortableUsage(summary.usage)!] : []),
+    ])
+    const nativeCost = result?.total_cost_usd
+    const summaryCost = summary?.runtimeEstimatedCostUsd
+    const combinedCost =
+      typeof nativeCost === 'number' &&
+      Number.isFinite(nativeCost) &&
+      nativeCost >= 0 &&
+      (!summary || (typeof summaryCost === 'number' && Number.isFinite(summaryCost) && summaryCost >= 0))
+        ? nativeCost + (summaryCost ?? 0)
+        : undefined
+    args.signal.throwIfAborted()
+    return {
+      sessionId: binding.sessionId,
+      success: !!summary?.summary.trim(),
+      tokensRemoved: 0,
+      summary: summary?.summary ?? null,
+      exhaustion: classification.info,
+      ...(summary?.summary.trim() ? { portable: true } : {}),
+      ...(combinedUsage
+        ? { usage: { ...combinedUsage, ...(combinedCost != null ? { runtimeEstimatedCostUsd: combinedCost } : {}) } }
+        : {}),
+    }
+  }
   const onAbort = () => {
     abortController.abort(args.signal.reason ?? new Error('Claude compaction aborted.'))
     query?.close()
   }
   args.signal.addEventListener('abort', onAbort, { once: true })
   try {
+    nativeAttempt = beginClaudeAttempt({
+      providerId:
+        args.initialTarget?.providerId ??
+        `builtin_claude_subscription${binding.accountId ? `@${binding.accountId}` : ''}`,
+      accountIdentity: args.accountIdentity,
+      scope: 'helper',
+      conversationId: args.conversationId,
+      abort: (reason) => operationController.abort(reason),
+    })
+    args.signal.throwIfAborted()
     query = args.manager.createQuery({
       prompt: command,
       options: buildClaudeCompactionQueryOptions({
@@ -1847,6 +2427,9 @@ export async function compactClaudeSession(args: CompactClaudeSessionArgs): Prom
       }),
     })
     for await (const message of query) {
+      if (message.type === 'rate_limit_event') rateLimitInfo = message.rate_limit_info
+      if (message.type === 'assistant')
+        partialUsage.set(message.message.id, normalizeClaudeUsage(message.message.usage))
       if (message.type === 'system' && message.subtype === 'compact_boundary') {
         boundary = message
         const measured = await settleWithin(query.getContextUsage(), 1_500, args.signal)
@@ -1862,6 +2445,8 @@ export async function compactClaudeSession(args: CompactClaudeSessionArgs): Prom
     }
     args.signal.throwIfAborted()
     args.manager.assertAccountIdentity(args.accountIdentity)
+    const recovered = await recoverQuota(result)
+    if (recovered) return recovered
     const normalizedUsage = result ? normalizeClaudeUsage(result.usage) : undefined
     const servedModelMismatch = claudeServedModelMismatch(
       args.resolvedModelId ?? args.selection.modelId,
@@ -1916,9 +2501,14 @@ export async function compactClaudeSession(args: CompactClaudeSessionArgs): Prom
           }
         : {}),
     }
+  } catch (error) {
+    const recovered = await recoverQuota(error)
+    if (recovered) return recovered
+    throw error
   } finally {
     args.signal.removeEventListener('abort', onAbort)
     query?.close()
     await runtime.close().catch(() => undefined)
+    nativeAttempt?.release()
   }
 }

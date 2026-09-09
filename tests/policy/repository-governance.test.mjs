@@ -106,7 +106,7 @@ test('CI is read-only and exposes stable platform names', () => {
 })
 
 test('contribution policy preserves truthful authorship and standard commit metadata', () => {
-  const source = [read('CONTRIBUTING.md'), read('docs/repository-governance.md')].join('\n')
+  const source = read('CONTRIBUTING.md')
   assert.match(source, /truthful (?:commit )?authorship|truthful Git identity/)
   assert.match(source, /Pull requests are welcome from any GitHub account|Anyone may open a pull request/)
   assert.match(source, /bodies.*(?:trailers|attribution)|Bodies.*Co-authored-by/s)
@@ -121,8 +121,10 @@ test('packages include synchronized project and runtime license notices', () => 
   const manifest = JSON.parse(read('apps/desktop/package.json'))
   const notices = read('THIRD_PARTY_NOTICES.md')
   const codexNotice = read('apps/desktop/resources/licenses/openai-codex-runtime-NOTICE.txt')
+  const codexFetcher = read('scripts/fetch-codex-runtime.mjs')
   assert.ok(notices.includes('`@openai/codex` ' + manifest.devDependencies['@openai/codex']))
   assert.ok(codexNotice.includes('Version: ' + manifest.devDependencies['@openai/codex']))
+  assert.ok(codexFetcher.includes(`CODEX_RUNTIME_VERSION = '${manifest.devDependencies['@openai/codex']}'`))
 })
 
 test('dependency policy covers the packaged local ML closure', () => {

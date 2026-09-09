@@ -48,6 +48,10 @@ import {
   SUPPORTED_FAILOVER_KINDS,
   type CodexRuntimeTarget,
 } from './subscription-failover'
+import { resolveClaudeRuntimeTarget, type ClaudeRuntimeTarget } from './subscription-failover/claude-adapter'
+import { listClaudeAttempts, setClaudeAttemptOwner } from './subscription-failover/claude-attempts'
+import { runClaudeEphemeralWithFailover } from './subscription-failover/claude-ephemeral'
+import { recordModelCallUsage } from './usage-diagnostics'
 import { apiKeyStorageMode, clearApiKey, hasApiKey, setApiKey } from './credentials'
 import { fetchModels, fetchModelWindow, invalidateModels } from './models'
 import { getContextLimit, setContextLimit, resolveContextWindow } from './context-limits'
@@ -59,7 +63,13 @@ import {
   updateMcpServer,
   type McpServer,
 } from './mcp'
-import { invalidateProvider, resolveLanguageModel, resolveChatModel, ChatConfigError } from './provider'
+import {
+  invalidateProvider,
+  resolveLanguageModel,
+  resolveChatModel,
+  resolveChatHarnessMetadata,
+  ChatConfigError,
+} from './provider'
 import { isOpenAIHarnessActive } from './harness'
 import {
   PermissionBroker,
@@ -81,6 +91,7 @@ import {
   getCodexThreadBinding,
   retryManagedCodexThreadCleanup,
   runCodexSubscriptionChat,
+  type CodexActiveTurnControlPort,
   type CodexSubscriptionStatus,
 } from './codex-subscription'
 import { resolveCodexContextWindow } from './codex-subscription/context-window'
@@ -206,6 +217,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { generateText } from 'ai'
 import type { ModelInfo as GitHubCopilotModelInfo } from '@github/copilot-sdk'
 import type { ModelInfo as ClaudeModelInfo } from '@anthropic-ai/claude-agent-sdk'
+import { OPENAI_GPT6_ASTRA_MANIFEST, resolveModelHarnessProfile } from './model-harness-profile'
 import { searchFiles } from './file-search'
 import { listUserPrompts, addUserPrompt, updateUserPrompt, removeUserPrompt, listProjectCommands } from './commands'
 import {
@@ -297,6 +309,7 @@ import {
   type StandardToMaestroResult,
 } from '../../shared/conversation-experience'
 import type { ChatMode } from '../../shared/chat'
+import { isChatMode, normalizeChatMode } from '../../shared/chat-mode'
 import type { MaestroOrchestratorProfileV1 } from '../../shared/maestro'
 import { tFor } from '../i18n'
 import { getMainWebContents } from '../window-ipc'
@@ -345,6 +358,8 @@ import {
   setImageInterpreter,
 } from './image-interpreter'
 import { recordIpcSend } from '../performance/metrics'
+import { FABLE_51_PROFILE_FLAG, resolveFableBehaviorProfile, type FableBehaviorProfile } from './fable/profile'
+import { compileFableCompactionSystem } from './fable/prompt'
 
 type SafeSend = (channel: string, payload: unknown) => void
 
@@ -578,6 +593,8 @@ interface ActiveRun {
   /** Claude identity captured at admission; account changes/logout revoke the native session. */
   claudeIdentity?: ClaudeSubscriptionAccountIdentity
   claudeSessionId?: string
+  claudeSessionProviderId?: string
+  claudeSessionAccountId?: string | null
   allowClaudePersistence: boolean
   /** Grok identity captured at admission; account changes/logout abort the turn (generic runner). */
   grokIdentity?: GrokAccountIdentity
@@ -588,6 +605,11 @@ interface ActiveRun {
   settleOutcome: (outcome: InternalTurnOutcome) => void
   /** Host-owned inbox for the Maestro turn; absent in Standard/review-loop. */
   maestroLive?: MaestroLiveRunPort
+  activeHarnessProfile: import('../../shared/chat').ChatActiveHarnessProfile | null
+  midTurnSteering: boolean
+  liveReasoningUpdate: boolean
+  codexTurnControl?: CodexActiveTurnControlPort
+  acceptedSteeringMessageIds: Set<string>
 }
 
 interface PendingConversationOperation {
@@ -616,12 +638,14 @@ function runUsesPhysicalProvider(run: ActiveRun, providerId: string): boolean {
   return (
     (run.activeSubscriptionProviders.get(providerId) ?? 0) > 0 ||
     run.effectiveProviderId === providerId ||
-    run.codexThreadProviderId === providerId
+    run.codexThreadProviderId === providerId ||
+    run.claudeSessionProviderId === providerId
   )
 }
 
 function physicalAccountId(run: ActiveRun): string | null {
   // undefined = not yet known; null = physical default account (do not fall back to the logical provider).
+  if (run.claudeSessionAccountId !== undefined) return run.claudeSessionAccountId
   if (run.codexThreadAccountId !== undefined) return run.codexThreadAccountId
   if (run.effectiveProviderId) return subscriptionAccountId(run.effectiveProviderId)
   return subscriptionAccountId(run.providerId)
@@ -740,6 +764,33 @@ setCodexEphemeralAttemptOwner((attempt) => {
   }
 })
 
+setClaudeAttemptOwner((attempt) => {
+  if (claudePhysicalIdentityIsChanging(attempt.providerId)) {
+    const error = new Error('Claude account changed')
+    attempt.abort(error)
+    throw error
+  }
+  // Manual/preflight compaction has a reservation but no ActiveRun yet.
+  const operation = attempt.conversationId ? pendingConversationOperations.get(attempt.conversationId) : undefined
+  if (operation && attempt.scope === 'helper') operation.effectiveProviderId = attempt.providerId
+  const run = attempt.conversationId ? active.get(attempt.conversationId) : undefined
+  if (!run) return
+  acquireActiveProvider(run, attempt.providerId)
+  return () => {
+    releaseActiveProvider(run, attempt.providerId)
+    // Between physical attempts there is no root session owner. Keeping A here
+    // would let logout of an already-retired A cancel B's preflight/helper work.
+    if (attempt.scope === 'root' && run.effectiveProviderId === attempt.providerId) {
+      run.effectiveProviderId = undefined
+      if (run.claudeSessionProviderId === attempt.providerId) {
+        run.claudeSessionProviderId = undefined
+        run.claudeSessionAccountId = undefined
+        run.claudeSessionId = undefined
+      }
+    }
+  }
+})
+
 let broker: PermissionBroker | null = null
 let questionBroker: QuestionBroker | null = null
 let chatDisposePromise: Promise<void> | null = null
@@ -782,6 +833,7 @@ let githubCopilotAuthGeneration = 0
 let githubCopilotConfigRefreshPromise: Promise<void> | null = null
 let githubCopilotAuthUpdatedUnsubscribe: (() => void) | null = null
 let githubCopilotIdentityTransitionPromise: Promise<void> | null = null
+const claudeSlotTransitions = new Set<string>()
 let claudeLoginPending = false
 let claudeAuthGeneration = 0
 let claudeConfigRefreshPromise: Promise<void> | null = null
@@ -1375,9 +1427,18 @@ function scheduleGitHubCopilotConfigRefresh(previous: ChatSubscriptionAuthStatus
   githubCopilotConfigRefreshPromise = promise
 }
 
+function claudePhysicalIdentityIsChanging(providerId: string): boolean {
+  return subscriptionAccountId(providerId) === null
+    ? claudeLoginPending || claudeIdentityTransitionPromise !== null
+    : claudeSlotTransitions.has(providerId)
+}
+
 function cancelPendingClaudeOperations(): void {
   for (const [, operation] of pendingConversationOperations) {
-    if (isClaudeSubscriptionProvider(operation.providerId) && subscriptionAccountId(operation.providerId) === null) {
+    if (
+      isClaudeSubscriptionProvider(pendingPhysicalProviderId(operation)) &&
+      subscriptionAccountId(pendingPhysicalProviderId(operation)) === null
+    ) {
       operation.controller.abort(new Error('Claude account changed'))
     }
   }
@@ -1671,6 +1732,18 @@ function defaultReasoningEffort(): string {
   return typeof r === 'string' && r.trim() ? r : 'off'
 }
 
+function codexSerializableReasoningEfforts(modelId: string, efforts: readonly string[]): string[] {
+  const astra =
+    resolveModelHarnessProfile({
+      providerKind: 'codex-subscription',
+      modelId,
+      astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
+    }).id === 'openai-gpt-6-astra-v1'
+  return astra
+    ? efforts.filter((effort) => OPENAI_GPT6_ASTRA_MANIFEST.validReasoningEfforts.includes(effort))
+    : [...efforts]
+}
+
 function makeSafeSend(wc: WebContents): SafeSend {
   return (channel, payload) => sendChatEvent(wc, channel, payload)
 }
@@ -1811,6 +1884,7 @@ function buildConfig(): ChatConfig {
     imageGenEnabled: getAppFlag(IMAGE_GEN_FLAG, true),
     bashFiltersEnabled: getAppFlag('chat.bashFilters', true),
     openAIHarnessEnabled: getAppFlag('chat.openAIHarness', true),
+    astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
     storageMode: apiKeyStorageMode(),
     defaultSelection: defaultSelection(),
     defaultReasoning: defaultReasoningEffort(),
@@ -1866,6 +1940,12 @@ async function runnerCapabilityMetaFallback(providerId: string, modelId: string)
       reasoning: reasoningEfforts.length > 0,
       reasoningEfforts,
       fastModeCapability,
+      nativeUltraMode:
+        resolveModelHarnessProfile({
+          providerKind: 'codex-subscription',
+          modelId,
+          astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
+        }).id === 'openai-gpt-6-astra-v1' && reasoningEfforts.includes('ultra'),
     }
   }
   if (isGitHubCopilotSubscriptionProvider(providerId)) {
@@ -2090,6 +2170,9 @@ export function chatRuntimeState(conversationId: string): ChatRuntimeState {
       .map((request) => toRequestPayload(request).request),
     pendingQuestions: getQuestionBroker().pendingQuestionsFor(conversationId),
     maestroLive: maestroLiveState(run?.maestroLive),
+    midTurnSteering: run?.midTurnSteering === true,
+    liveReasoningUpdate: run?.liveReasoningUpdate === true,
+    activeHarnessProfile: run?.activeHarnessProfile ?? null,
   }
 }
 
@@ -2160,8 +2243,7 @@ function rulesetFor(conversationId: string): Ruleset {
 
 /** Effective conversation behavior mode (default agent). */
 function modeFor(conversationId: string): ChatMode {
-  const m = getConvUiPrefs(conversationId).chat?.mode
-  return m === 'plan' || m === 'ask' ? m : 'agent'
+  return normalizeChatMode(getConvUiPrefs(conversationId).chat?.mode)
 }
 
 /** Single structural behavior resolver used by admission, compatibility checks and every runtime. */
@@ -2170,7 +2252,7 @@ function behaviorFor(conversationId: string): ChatBehavior {
 }
 
 /** Sets conversation behavior mode (used by index when approving a plan → return to agent). */
-export function setChatMode(conversationId: string, mode: 'agent' | 'plan' | 'ask'): void {
+export function setChatMode(conversationId: string, mode: ChatMode): void {
   if (getConversation(conversationId)?.experience === 'maestro') return
   patchConvChat(conversationId, { mode })
 }
@@ -2468,9 +2550,16 @@ async function effectiveModelMeta(
     const providerWindow = resolvedContext.maxNominal ?? undefined
     const effective = resolvedContext.effectiveEstimate ?? undefined
     const reasoningEfforts = codexModel?.supportedReasoningEfforts?.map((option) => option.reasoningEffort) ?? []
+    const astraProfileActive =
+      resolveModelHarnessProfile({
+        providerKind: 'codex-subscription',
+        modelId: codexModel?.model ?? modelId,
+        astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
+      }).id === 'openai-gpt-6-astra-v1'
     const nativeUltraMode = Boolean(
       codexModel?.supportedReasoningEfforts?.some(
-        (option) => option.reasoningEffort === 'ultra' && /delegat|subagent/i.test(option.description)
+        (option) =>
+          option.reasoningEffort === 'ultra' && (astraProfileActive || /delegat|subagent/i.test(option.description))
       )
     )
     const fastModeCapability = Boolean(
@@ -2643,6 +2732,19 @@ async function effectiveModelMeta(
     : effective != null
       ? ({ contextWindow: effective } as ChatModelMeta)
       : null
+  if (outMeta?.reasoningEfforts?.includes('ultra')) {
+    try {
+      if (
+        resolveChatHarnessMetadata(providerId, modelId, {
+          astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
+        }).modelHarnessProfileId === 'openai-gpt-6-astra-v1'
+      ) {
+        outMeta.nativeUltraMode = true
+      }
+    } catch {
+      // Missing provider metadata already degrades through the normal selector path.
+    }
+  }
   return { meta: outMeta, providerWindow, catalogWindow, limit }
 }
 
@@ -2660,7 +2762,10 @@ async function preflightContext(
   operation: PendingConversationOperation,
   signal: AbortSignal,
   /** Physical Codex window; `undefined` means use the logical provider metadata path. */
-  physicalContextWindow?: number | null
+  physicalContextWindow?: number | null,
+  claudeFailoverChain?: readonly string[],
+  physicalClaudeProviderId?: string,
+  claudeExecutionAxes?: Pick<ClaudeRuntimeTarget, 'reasoningEffort' | 'fastMode'>
 ): Promise<ContextPreflightResult> {
   const hasPhysicalContextWindow = physicalContextWindow !== undefined
   const { meta } = hasPhysicalContextWindow
@@ -2668,7 +2773,8 @@ async function preflightContext(
     : await effectiveModelMeta(selection.modelId, selection.providerId, signal)
   if (isClaudeSubscriptionProvider(selection.providerId) && getClaudeSessionBinding(conversationId)) {
     const conv = getConversation(conversationId)
-    const manager = getClaudeSubscriptionManager(subscriptionAccountId(selection.providerId))
+    const binding = getClaudeSessionBinding(conversationId)!
+    const manager = getClaudeSubscriptionManager(binding.accountId)
     const status = manager.getStatusSnapshot()
     const models = await manager.listModels(signal).catch(() => {
       signal.throwIfAborted()
@@ -2704,7 +2810,7 @@ async function preflightContext(
   const window = hasPhysicalContextWindow ? (physicalContextWindow ?? undefined) : meta?.contextWindow
   if (!window) return { ok: true, compacted: false }
   const pending = estimatePortablePartsTokens(pendingParts) + 16
-  const projection = (await currentChatHistoryStats(conversationId)).contextProjection
+  const projection = (await currentChatHistoryStats(conversationId, physicalClaudeProviderId)).contextProjection
   const before = projection?.usedTokens ?? 0
   const source = projection?.source ?? 'portable-transcript'
   const load = preflightContextLoad(window, before, pending, source, AUTO_COMPACT_RATIO)
@@ -2715,6 +2821,8 @@ async function preflightContext(
     signal,
     contextWindow: window,
     operation,
+    claudeFailoverChain,
+    claudeExecutionAxes,
   })
   if (!compacted.ok) {
     // Automatic compaction failed AND preflight required it (shouldCompact): do NOT admit the
@@ -2737,7 +2845,7 @@ async function preflightContext(
     })
     return { ok: false, compacted: false, error: 'context-compaction-failed' }
   }
-  const afterProjection = (await currentChatHistoryStats(conversationId)).contextProjection
+  const afterProjection = (await currentChatHistoryStats(conversationId, physicalClaudeProviderId)).contextProjection
   const after = afterProjection?.usedTokens ?? 0
   const afterSource = afterProjection?.source ?? 'portable-transcript'
   if (preflightContextLoad(window, after, pending, afterSource, AUTO_COMPACT_RATIO).overflow) {
@@ -2783,7 +2891,10 @@ async function preflightIsolatedContext(
 
 /** Stats recognize an opaque marker only when the same identity will actually be used in the next request.
  * INTERNAL to main: `lastUsage` may contain `contextIdentity`. Project through `toPublicChatHistoryStats` for IPC. */
-async function currentChatHistoryStats(conversationId: string): Promise<StoredChatHistoryStats> {
+async function currentChatHistoryStats(
+  conversationId: string,
+  physicalClaudeProviderId?: string
+): Promise<StoredChatHistoryStats> {
   const selection = selectionFor(conversationId)
   // Binding lastMessageId / portable projection: MAIN context only (isolated rounds do not invalidate resume
   // or inflate the reseed/preflight projection).
@@ -2843,11 +2954,24 @@ async function currentChatHistoryStats(conversationId: string): Promise<StoredCh
   } else if (isClaudeSubscriptionProvider(selection?.providerId)) {
     usesNativeSeedProjection = true
     const binding = getClaudeSessionBinding(conversationId)
-    const manager = getClaudeSubscriptionManager(subscriptionAccountId(selection?.providerId))
+    const manager = getClaudeSubscriptionManager(
+      binding ? binding.accountId : subscriptionAccountId(selection?.providerId)
+    )
     const identity = manager.getStatusSnapshot()
+    const physicalProviderId = subscriptionProviderIdFor(
+      'claude-subscription',
+      binding ? binding.accountId : subscriptionAccountId(selection?.providerId)
+    )
+    const eligible =
+      freezeFailoverChain(selection!.providerId).includes(physicalProviderId) &&
+      getSubscriptionFailoverRouter().isAdmissible(physicalProviderId)
     runtimeReusable = !!(
       binding &&
       binding.lastMessageId === latestMessage?.id &&
+      eligible &&
+      (!physicalClaudeProviderId || physicalClaudeProviderId === physicalProviderId) &&
+      identity?.available !== false &&
+      identity?.authenticated &&
       binding.modelId === manager.getResolvedModelId(selection?.modelId ?? '') &&
       binding.accountFingerprint === identity?.accountFingerprint &&
       binding.accountEpoch === identity?.accountEpoch
@@ -2869,7 +2993,9 @@ async function currentChatHistoryStats(conversationId: string): Promise<StoredCh
     )
     if (runtimeReusable) {
       try {
-        const resolved = resolveChatModel(selection!.providerId, selection!.modelId)
+        const resolved = resolveChatModel(selection!.providerId, selection!.modelId, {
+          astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
+        })
         runtimeReusable = stats.lastUsage?.contextIdentity === resolved.providerFingerprint
         if (
           runtimeReusable &&
@@ -2883,6 +3009,7 @@ async function currentChatHistoryStats(conversationId: string): Promise<StoredCh
               providerId: selection!.providerId,
               modelId: selection!.modelId,
               providerFingerprint: resolved.providerFingerprint,
+              modelHarnessProfileId: resolved.modelHarnessProfileId,
             })
           )
         }
@@ -3001,6 +3128,35 @@ async function startSend(
   let githubCopilotModelAtAdmission: GitHubCopilotModelInfo | undefined
   let claudeIdentityAtAdmission: ClaudeSubscriptionAccountIdentity | undefined
   let claudeModelAtAdmission: ClaudeModelInfo | undefined
+  const claudeFailoverChain = isClaudeSubscriptionProvider(selection.providerId)
+    ? internalLoop
+      ? [selection.providerId]
+      : freezeFailoverChain(selection.providerId)
+    : []
+  const claudeRequestedEffort =
+    internalLoop?.selectionOverride.reasoning ?? getConvUiPrefs(conversationId).chat?.reasoning
+  const claudeRequestedFast = internalLoop
+    ? internalLoop.selectionOverride.fastMode === true
+    : getConvUiPrefs(conversationId).chat?.fastMode === true
+  let claudeRuntimeTarget: ClaudeRuntimeTarget | undefined
+  let claudeRuntimeLeaseTransferred = false
+  const settleClaudeRuntimeLeaseIfUnowned = (): void => {
+    if (claudeRuntimeLeaseTransferred || !claudeRuntimeTarget?.availabilityLease) return
+    getSubscriptionFailoverRouter().confirmAttemptOther(
+      claudeRuntimeTarget.providerId,
+      claudeRuntimeTarget.availabilityLease
+    )
+    claudeRuntimeLeaseTransferred = true
+  }
+  const claudeAdmissionError = (
+    result: Exclude<Awaited<ReturnType<typeof resolveClaudeRuntimeTarget>>, { ok: true }>
+  ): string => {
+    if (result.error === 'aborted') return 'busy'
+    if (result.reason === 'quota-exhausted') return 'claude-accounts-exhausted'
+    if (result.reason === 'not-authenticated') return 'no-key'
+    if (result.reason === 'incompatible') return 'no-model'
+    return 'unavailable'
+  }
   let grokIdentityAtAdmission: GrokAccountIdentity | undefined
   let releaseCwdActivity: (() => void) | null = null
   let admittedRun: ActiveRun | null = null
@@ -3094,38 +3250,78 @@ async function startSend(
         return { ok: false, error: 'no-model' }
       }
     } else if (useClaudeSubscription) {
-      if (!selectionAccountId && (claudeLoginPending || claudeIdentityTransitionPromise))
-        return { ok: false, error: 'no-key' }
-      const manager = getClaudeSubscriptionManager(selectionAccountId)
-      const status = await manager.status({ refresh: true })
-      if (
-        !conversationOperationIsCurrent(conversationId, operation) ||
-        (!selectionAccountId && (claudeLoginPending || !!claudeIdentityTransitionPromise))
-      )
-        return { ok: false, error: 'busy' }
-      if (!status.authenticated || !status.accountFingerprint) return { ok: false, error: 'no-key' }
-      claudeIdentityAtAdmission = {
-        fingerprint: status.accountFingerprint,
-        epoch: status.accountEpoch,
+      if (claudeFailoverChain.length > 1) {
+        if (!selection.modelId) {
+          for (const providerId of claudeFailoverChain) {
+            if (
+              claudePhysicalIdentityIsChanging(providerId) ||
+              !getSubscriptionFailoverRouter().isAdmissible(providerId)
+            )
+              continue
+            const manager = getClaudeSubscriptionManager(subscriptionAccountId(providerId))
+            const status = await manager.status()
+            if (!status.authenticated || !status.accountFingerprint) continue
+            const modelId = (await manager.listModels(operation.controller.signal))[0]?.value
+            if (!modelId) continue
+            selection = { providerId: selection.providerId, modelId }
+            patchConvChat(conversationId, { providerId: selection.providerId, modelId: selection.modelId })
+            break
+          }
+          if (!selection.modelId) return { ok: false, error: 'no-model' }
+        }
+        const resolved = await resolveClaudeRuntimeTarget({
+          logicalProviderId: selection.providerId,
+          modelId: selection.modelId,
+          reasoningEffort: claudeRequestedEffort,
+          fastMode: claudeRequestedFast,
+          chain: claudeFailoverChain,
+          attemptedProviderIds: new Set(claudeFailoverChain.filter(claudePhysicalIdentityIsChanging)),
+          admit: false,
+          signal: operation.controller.signal,
+        })
+        if (!resolved.ok) return { ok: false, error: claudeAdmissionError(resolved) }
+        claudeRuntimeTarget = resolved.target
+        settleClaudeRuntimeLeaseIfUnowned()
+        claudeModelAtAdmission = resolved.target.model
+        claudeIdentityAtAdmission = resolved.target.accountIdentity
+        operation.effectiveProviderId = resolved.target.providerId
+      } else {
+        if (!selectionAccountId && (claudeLoginPending || claudeIdentityTransitionPromise))
+          return { ok: false, error: 'no-key' }
+        const manager = getClaudeSubscriptionManager(selectionAccountId)
+        const status = await manager.status({ refresh: true })
+        if (
+          !conversationOperationIsCurrent(conversationId, operation) ||
+          (!selectionAccountId && (claudeLoginPending || !!claudeIdentityTransitionPromise))
+        )
+          return { ok: false, error: 'busy' }
+        if (!status.authenticated || !status.accountFingerprint) return { ok: false, error: 'no-key' }
+        claudeIdentityAtAdmission = {
+          fingerprint: status.accountFingerprint,
+          epoch: status.accountEpoch,
+        }
+        manager.assertAccountIdentity(claudeIdentityAtAdmission)
+        const models = await manager.listModels(operation.controller.signal, Boolean(internalLoop))
+        if (
+          !conversationOperationIsCurrent(conversationId, operation) ||
+          (!selectionAccountId && (claudeLoginPending || !!claudeIdentityTransitionPromise))
+        )
+          return { ok: false, error: 'busy' }
+        manager.assertAccountIdentity(claudeIdentityAtAdmission)
+        if (!selection.modelId) {
+          const modelId = models[0]?.value ?? ''
+          if (!modelId) return { ok: false, error: 'no-model' }
+          selection = { providerId: selection.providerId, modelId }
+          patchConvChat(conversationId, {
+            providerId: selection.providerId,
+            modelId,
+          })
+        }
+        claudeModelAtAdmission = models.find(
+          (model) => model.value === selection?.modelId || model.resolvedModel === selection?.modelId
+        )
+        if (!claudeModelAtAdmission) return { ok: false, error: 'no-model' }
       }
-      manager.assertAccountIdentity(claudeIdentityAtAdmission)
-      const models = await manager.listModels(operation.controller.signal, Boolean(internalLoop))
-      if (
-        !conversationOperationIsCurrent(conversationId, operation) ||
-        (!selectionAccountId && (claudeLoginPending || !!claudeIdentityTransitionPromise))
-      )
-        return { ok: false, error: 'busy' }
-      manager.assertAccountIdentity(claudeIdentityAtAdmission)
-      if (!selection.modelId) {
-        const modelId = models[0]?.value ?? ''
-        if (!modelId) return { ok: false, error: 'no-model' }
-        selection = { providerId: selection.providerId, modelId }
-        patchConvChat(conversationId, { providerId: selection.providerId, modelId })
-      }
-      claudeModelAtAdmission = models.find(
-        (model) => model.value === selection?.modelId || model.resolvedModel === selection?.modelId
-      )
-      if (!claudeModelAtAdmission) return { ok: false, error: 'no-model' }
     } else if (useGrokSubscription) {
       if (!selectionAccountId && (grokLoginPending || grokIdentityTransitionPromise)) {
         return { ok: false, error: 'no-key' }
@@ -3189,7 +3385,9 @@ async function startSend(
       (useGitHubCopilot &&
         !selectionAccountId &&
         (githubCopilotLoginPending || githubCopilotIdentityTransitionPromise)) ||
-      (useClaudeSubscription && !selectionAccountId && (claudeLoginPending || claudeIdentityTransitionPromise)) ||
+      (useClaudeSubscription &&
+        !subscriptionAccountId(operation.effectiveProviderId ?? selection.providerId) &&
+        (claudeLoginPending || claudeIdentityTransitionPromise)) ||
       (useGrokSubscription && !selectionAccountId && (grokLoginPending || grokIdentityTransitionPromise))
     )
       return { ok: false, error: 'busy' }
@@ -3197,7 +3395,9 @@ async function startSend(
       getGitHubCopilotSubscriptionManager(selectionAccountId).assertAccountIdentity(githubCopilotIdentityAtAdmission)
     }
     if (useClaudeSubscription && claudeIdentityAtAdmission) {
-      getClaudeSubscriptionManager(selectionAccountId).assertAccountIdentity(claudeIdentityAtAdmission)
+      ;(claudeRuntimeTarget?.manager ?? getClaudeSubscriptionManager(selectionAccountId)).assertAccountIdentity(
+        claudeIdentityAtAdmission
+      )
     }
     if (useGrokSubscription && grokIdentityAtAdmission) {
       getGrokSubscriptionManager(selectionAccountId).assertAccountIdentity(grokIdentityAtAdmission)
@@ -3332,6 +3532,18 @@ async function startSend(
     const isolated =
       !!internalLoop && internalLoop.contextPolicy === 'isolated' && internalLoop.providerSessionPolicy === 'ephemeral'
     const frozenProfile = internalLoop?.selectionOverride
+    const behaviorRequestedModelId = selection.modelId
+    const behaviorProfileFor = (resolvedModelId?: string | null): FableBehaviorProfile | null => {
+      const resolution = resolveFableBehaviorProfile({
+        requestedModelId: behaviorRequestedModelId,
+        resolvedModelId,
+        enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
+        frozen: isolated && frozenProfile != null,
+        frozenProfileId: frozenProfile?.behaviorProfileId,
+      })
+      if (resolution.reason === 'frozen-profile-mismatch') throw new Error('executor-unavailable')
+      return resolution.profile
+    }
     const executionScope: ChatExecutionScope | undefined =
       isolated && internalLoop
         ? {
@@ -3408,6 +3620,55 @@ async function startSend(
       }
     }
 
+    const initialClaudeAxes = claudeModelAtAdmission
+      ? claudeRuntimeAxes(conversationId, claudeModelAtAdmission, claudeRequestedEffort, claudeRequestedFast, isolated)
+      : undefined
+    const claudeRuntimeContract =
+      internalLoop?.selectionOverride.resolvedModelId ??
+      claudeRuntimeTarget?.runtimeModelId ??
+      claudeModelAtAdmission?.resolvedModel ??
+      claudeModelAtAdmission?.value
+    const resolveClaudeTargetForStart = async (admit: boolean) => {
+      const resolved = await resolveClaudeRuntimeTarget({
+        logicalProviderId: selection!.providerId,
+        modelId: selection!.modelId,
+        runtimeModelId: claudeRuntimeContract,
+        reasoningEffort:
+          claudeFailoverChain.length === 1 && !claudeModelAtAdmission?.supportedEffortLevels?.length
+            ? undefined
+            : initialClaudeAxes?.reasoningEffort,
+        fastMode: initialClaudeAxes?.fastMode,
+        chain: claudeFailoverChain,
+        attemptedProviderIds: new Set(claudeFailoverChain.filter(claudePhysicalIdentityIsChanging)),
+        admit,
+        signal: operation.controller.signal,
+      })
+      if (!resolved.ok) return { ok: false as const, error: claudeAdmissionError(resolved) }
+      settleClaudeRuntimeLeaseIfUnowned()
+      claudeRuntimeTarget = {
+        ...resolved.target,
+        ...(claudeFailoverChain.length === 1 ? { reasoningEffort: initialClaudeAxes?.reasoningEffort } : {}),
+        maestrlyUltra: initialClaudeAxes?.maestrlyUltra ?? resolved.target.maestrlyUltra,
+      }
+      claudeRuntimeLeaseTransferred = false
+      if (!admit) settleClaudeRuntimeLeaseIfUnowned()
+      operation.effectiveProviderId = resolved.target.providerId
+      if (
+        !conversationOperationIsCurrent(conversationId, operation) ||
+        claudePhysicalIdentityIsChanging(resolved.target.providerId)
+      )
+        return { ok: false as const, error: 'busy' }
+      return { ok: true as const, target: claudeRuntimeTarget }
+    }
+    let smallestClaudeWindow: number | null | undefined
+    let preflightedClaudeProviderId: string | undefined
+    if (useClaudeSubscription && !isolated) {
+      const capability = await resolveClaudeTargetForStart(false)
+      if (!capability.ok) return capability
+      smallestClaudeWindow = capability.target.contextWindow
+      preflightedClaudeProviderId = capability.target.providerId
+    }
+
     const resolveCodexTargetForStart = async (
       admit: boolean
     ): Promise<{ ok: true; target?: CodexRuntimeTarget } | { ok: false; error: string }> => {
@@ -3421,6 +3682,7 @@ async function startSend(
         logicalProviderId: codexSelection.providerId,
         modelId: codexSelection.modelId,
         reasoningEffort: codexRequestedEffort && codexRequestedEffort !== 'off' ? codexRequestedEffort : undefined,
+        astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
         fastMode: codexFastMode,
         configureContextWindow: true,
         chain,
@@ -3488,7 +3750,10 @@ async function startSend(
             preflightParts,
             operation,
             operation.controller.signal,
-            codexPreflightContextWindow
+            useClaudeSubscription ? smallestClaudeWindow : codexPreflightContextWindow,
+            useClaudeSubscription ? claudeFailoverChain : undefined,
+            preflightedClaudeProviderId,
+            initialClaudeAxes
           )
     if (!preflight.ok) return { ok: false, error: preflight.error }
 
@@ -3577,6 +3842,46 @@ async function startSend(
       throw new Error('Codex runtime target was not resolved before start')
     }
 
+    if (useClaudeSubscription && !isolated) {
+      let admitted = false
+      for (let attempt = 0; attempt < Math.max(2, claudeFailoverChain.length + 1); attempt++) {
+        const result = await resolveClaudeTargetForStart(true)
+        if (!result.ok) return result
+        const window = result.target.contextWindow
+        if (
+          window == null ||
+          (smallestClaudeWindow != null &&
+            window >= smallestClaudeWindow &&
+            result.target.providerId === preflightedClaudeProviderId)
+        ) {
+          admitted = true
+          break
+        }
+        settleClaudeRuntimeLeaseIfUnowned()
+        const checked = await preflightContext(
+          conversationId,
+          selection,
+          preflightParts,
+          operation,
+          operation.controller.signal,
+          smallestClaudeWindow != null ? Math.min(smallestClaudeWindow, window) : window,
+          claudeFailoverChain,
+          result.target.providerId,
+          initialClaudeAxes
+        )
+        if (!checked.ok) return { ok: false, error: checked.error }
+        smallestClaudeWindow = smallestClaudeWindow != null ? Math.min(smallestClaudeWindow, window) : window
+        preflightedClaudeProviderId = result.target.providerId
+        preflight = {
+          ok: true,
+          compacted: preflight.compacted || checked.compacted,
+        }
+      }
+      if (!admitted) return { ok: false, error: 'unavailable' }
+      claudeIdentityAtAdmission = claudeRuntimeTarget!.accountIdentity
+      claudeModelAtAdmission = claudeRuntimeTarget!.model
+    }
+
     const send = makeSafeSend(wc)
     const controller = new AbortController()
     const assistantMessageId = useOfficialSubscription ? '' : randomUUID()
@@ -3603,6 +3908,13 @@ async function startSend(
       messageId: assistantMessageId,
       providerId: selection.providerId,
       ...(admittedCodexTarget ? { effectiveProviderId: admittedCodexTarget.providerId } : {}),
+      ...(useClaudeSubscription
+        ? {
+            effectiveProviderId: claudeRuntimeTarget?.providerId ?? selection.providerId,
+            claudeSessionProviderId: claudeRuntimeTarget?.providerId ?? selection.providerId,
+            claudeSessionAccountId: claudeRuntimeTarget ? claudeRuntimeTarget.accountId : selectionAccountId,
+          }
+        : {}),
       activeSubscriptionProviders: new Map(),
       ...(useCodexSubscription ? { codexAccountEpoch: accountEpochAtAdmission } : {}),
       ...(githubCopilotIdentityAtAdmission ? { githubCopilotIdentity: githubCopilotIdentityAtAdmission } : {}),
@@ -3618,6 +3930,10 @@ async function startSend(
       settleDone,
       outcome,
       settleOutcome,
+      activeHarnessProfile: null,
+      midTurnSteering: false,
+      liveReasoningUpdate: false,
+      acceptedSteeringMessageIds: new Set(),
       ...(maestroLive ? { maestroLive } : {}),
     }
     if (admittedCodexTarget) acquireActiveProvider(run, admittedCodexTarget.providerId)
@@ -3704,6 +4020,28 @@ async function startSend(
       if (ev.kind === 'finish' && CUT_FINISH_REASONS.has(ev.finishReason)) wasInterrupted = true
       send(`chat:delta:${conversationId}`, ev)
     }
+    const applyCodexTurnControl = (control: CodexActiveTurnControlPort | null): void => {
+      if (active.get(conversationId) !== run) return
+      run.codexTurnControl = control ?? undefined
+      run.activeHarnessProfile = control?.harnessProfile ?? null
+      run.midTurnSteering = control?.midTurnSteering === true
+      run.liveReasoningUpdate = control?.liveReasoningUpdate === true
+      send(`chat:delta:${conversationId}`, {
+        kind: 'runtime-capabilities',
+        midTurnSteering: run.midTurnSteering,
+        liveReasoningUpdate: run.liveReasoningUpdate,
+        activeHarnessProfile: run.activeHarnessProfile,
+      } satisfies ChatStreamEvent)
+    }
+    const markAcceptedSteeringFailed = (): void => {
+      for (const messageId of run.acceptedSteeringMessageIds) {
+        const message = getChatMessage(conversationId, messageId)
+        if (message?.steering?.status !== 'queued') continue
+        const failed: ChatMessage = { ...message, steering: { status: 'failed' } }
+        upsertChatMessage(failed)
+        send(`chat:delta:${conversationId}`, { kind: 'steering-accepted', message: failed } satisfies ChatStreamEvent)
+      }
+    }
 
     // A target that became larger after the lease-free preflight must not reopen room within this admission.
     // The next turn resolves fresh; this turn remains bounded by the smallest physical estimate already validated.
@@ -3712,18 +4050,35 @@ async function startSend(
       ? admittedCodexContextWindow != null && smallestPreflightedCodexWindow != null
         ? Math.min(admittedCodexContextWindow, smallestPreflightedCodexWindow)
         : (admittedCodexContextWindow ?? smallestPreflightedCodexWindow)
-      : (await effectiveModelMeta(selection.modelId, selection.providerId).catch(() => null))?.meta?.contextWindow
+      : useClaudeSubscription && !isolated
+        ? (smallestClaudeWindow ?? claudeRuntimeTarget?.contextWindow ?? undefined)
+        : (await effectiveModelMeta(selection.modelId, selection.providerId).catch(() => null))?.meta?.contextWindow
     const observeTurnContextWindow = (value: unknown): void => {
       const next = Math.floor(Number(value) || 0)
       if (next <= 0) return
       turnContextWindow = turnContextWindow && turnContextWindow > 0 ? Math.min(turnContextWindow, next) : next
     }
-    const compactActiveHistory = () =>
+    const admittedBehaviorResolvedModelId = useClaudeSubscription
+      ? isolated && frozenProfile?.resolvedModelId
+        ? frozenProfile.resolvedModelId
+        : (claudeModelAtAdmission?.resolvedModel ?? claudeModelAtAdmission?.value)
+      : useGitHubCopilot
+        ? githubCopilotModelAtAdmission?.id
+        : undefined
+    const admittedBehaviorProfile = behaviorProfileFor(admittedBehaviorResolvedModelId)
+    const compactActiveHistory = (claudeTarget?: ClaudeRuntimeTarget) =>
       compact(conversationId, {
         allowActive: true,
         signal: controller.signal,
         persist: false,
-        contextWindow: turnContextWindow,
+        contextWindow: claudeTarget?.contextWindow
+          ? turnContextWindow
+            ? Math.min(turnContextWindow, claudeTarget.contextWindow)
+            : claudeTarget.contextWindow
+          : turnContextWindow,
+        ...(useClaudeSubscription ? { claudeFailoverChain, claudeExecutionAxes: initialClaudeAxes } : {}),
+        behaviorProfile: admittedBehaviorProfile,
+        ...(admittedBehaviorResolvedModelId ? { resolvedModelId: admittedBehaviorResolvedModelId } : {}),
         ...(isolated && internalLoop && frozenProfile
           ? {
               executionId: internalLoop.executionId,
@@ -3732,8 +4087,14 @@ async function startSend(
             }
           : {}),
       })
-        .then((result) =>
-          result.ok && result.summary
+        .then((result) => {
+          if (useClaudeSubscription && !result.ok && (result.usage || result.runtimeEstimatedCostUsd != null)) {
+            throw Object.assign(new Error(result.error ?? 'Claude portable compaction failed.'), {
+              partialUsage: result.usage,
+              runtimeEstimatedCostUsd: result.runtimeEstimatedCostUsd,
+            })
+          }
+          return result.ok && result.summary
             ? {
                 summary: result.summary,
                 usage: result.usage,
@@ -3743,8 +4104,15 @@ async function startSend(
                   : {}),
               }
             : null
-        )
-        .catch(() => null)
+        })
+        .catch((error) => {
+          if (
+            useClaudeSubscription &&
+            (extractIsolatedSummaryAttemptUsage(error) || typeof error?.runtimeEstimatedCostUsd === 'number')
+          )
+            throw error
+          return null
+        })
 
     let turnPromise: Promise<{ planSubmitted: boolean }>
     let maestroGuardContinuation: { prompt: string } | null = null
@@ -3782,7 +4150,10 @@ async function startSend(
           sameRequestObservation: observedContext,
         })
         if (resolvedContext.effectiveEstimate != null) turnContextWindow = resolvedContext.effectiveEstimate
-        const supportedEfforts = codexModel?.supportedReasoningEfforts.map((option) => option.reasoningEffort) ?? []
+        const supportedEfforts = codexSerializableReasoningEfforts(
+          codexModel?.model ?? selectedModelId,
+          codexModel?.supportedReasoningEfforts.map((option) => option.reasoningEffort) ?? []
+        )
         const resolved = resolveNativeReasoningEffort({
           requestedEffort,
           supportedEfforts,
@@ -3819,6 +4190,8 @@ async function startSend(
             runtimeImageUnsupported: getConvUiPrefs(conversationId).chat?.imagesUnsupported === true,
           }),
           client,
+          runtimeModel: codexModel,
+          eligibleChatGptSession: manager.getStatusSnapshot()?.account?.type === 'chatgpt',
           broker: getBroker(),
           questionBroker: getQuestionBroker(),
           emit,
@@ -3857,6 +4230,7 @@ async function startSend(
             run.allowCodexPersistence &&
             (selectionAccountId != null ||
               (!codexIdentityTransitionPending && run.codexAccountEpoch === codexAccountUpdateEpoch)),
+          onTurnControl: applyCodexTurnControl,
           ...(reviewLoopMessageMeta
             ? {
                 ephemeralSession: true as const,
@@ -3871,7 +4245,10 @@ async function startSend(
       const selectedModelId = selection.modelId
       const fastMode = isolated ? frozenProfile?.fastMode === true : codexFastMode
       const requestedEffort = turnReasoning(conversationId, frozenProfile)
-      const supportedEfforts = target.model.supportedReasoningEfforts.map((option) => option.reasoningEffort)
+      const supportedEfforts = codexSerializableReasoningEfforts(
+        target.runtimeModelId,
+        target.model.supportedReasoningEfforts.map((option) => option.reasoningEffort)
+      )
       const resolved = resolveNativeReasoningEffort({
         requestedEffort,
         supportedEfforts,
@@ -3912,6 +4289,8 @@ async function startSend(
           serviceTier,
           dropImages: target.dropImages,
           client: target.client,
+          runtimeModel: target.model,
+          eligibleChatGptSession: target.manager.getStatusSnapshot()?.account?.type === 'chatgpt',
           broker: getBroker(),
           questionBroker: getQuestionBroker(),
           emit,
@@ -3932,6 +4311,7 @@ async function startSend(
               logicalProviderId: selection!.providerId,
               modelId: selectedModelId,
               reasoningEffort: requestedEffort && requestedEffort !== 'off' ? requestedEffort : undefined,
+              astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
               fastMode,
               configureContextWindow: true,
               chain,
@@ -3961,6 +4341,7 @@ async function startSend(
           releasePhysicalProvider: (providerId) => {
             releaseActiveProvider(run, providerId)
           },
+          onTurnControl: applyCodexTurnControl,
           onFailoverTransition: (info) => {
             chatDiag({
               type: 'subscription-failover',
@@ -4056,6 +4437,7 @@ async function startSend(
           projectId: conv.workspaceId,
           cwd: conv.cwd,
           selection,
+          behaviorProfile: admittedBehaviorProfile,
           mode: turnBehavior,
           maestro: maestroTurn,
           maestroLive: run.maestroLive,
@@ -4110,17 +4492,21 @@ async function startSend(
     } else if (useClaudeSubscription && claudeIdentityAtAdmission && claudeModelAtAdmission) {
       const admittedIdentity = claudeIdentityAtAdmission
       const claudeModel = claudeModelAtAdmission
+      const selectedClaudeProviderId = selection.providerId
       const selectedClaudeModelId = selection.modelId
       turnPromise = (async () => {
-        const manager = getClaudeSubscriptionManager(selectionAccountId)
+        const manager = claudeRuntimeTarget?.manager ?? getClaudeSubscriptionManager(selectionAccountId)
         manager.assertAccountIdentity(admittedIdentity)
-        const claudeAxes = claudeRuntimeAxes(
-          conversationId,
-          claudeModel,
-          turnReasoning(conversationId, frozenProfile),
-          isolated ? frozenProfile?.fastMode === true : undefined,
-          isolated && !!frozenProfile
-        )
+        const claudeAxes =
+          !isolated && initialClaudeAxes
+            ? initialClaudeAxes
+            : claudeRuntimeAxes(
+                conversationId,
+                claudeModel,
+                turnReasoning(conversationId, frozenProfile),
+                isolated ? frozenProfile?.fastMode === true : undefined,
+                isolated && !!frozenProfile
+              )
         // Loop fail-closed: frozen axes must be reproduced exactly — same effective values as at
         // freeze (never degrade to default; Ultra with a changed list resolves differently → fail).
         if (
@@ -4131,15 +4517,82 @@ async function startSend(
           throw new Error('executor-unavailable')
         }
         const { reasoningEffort, fastMode, maestrlyUltra } = claudeAxes
-        return runClaudeChat({
+        const resolvedClaudeModelId =
+          isolated && frozenProfile?.resolvedModelId
+            ? frozenProfile.resolvedModelId
+            : (claudeModel.resolvedModel ?? claudeModel.value)
+        let effectiveTarget = claudeRuntimeTarget
+        const canPersist = (target = effectiveTarget): boolean => {
+          if (
+            !run.allowClaudePersistence ||
+            claudePhysicalIdentityIsChanging(target?.providerId ?? selectedClaudeProviderId)
+          )
+            return false
+          if (
+            target &&
+            (target.providerId !== run.effectiveProviderId ||
+              target.accountIdentity.fingerprint !== run.claudeIdentity?.fingerprint ||
+              target.accountIdentity.epoch !== run.claudeIdentity?.epoch)
+          )
+            return false
+          try {
+            const owner = target?.manager ?? manager
+            if (getClaudeSubscriptionManager(target ? target.accountId : selectionAccountId) !== owner) return false
+            owner.assertAccountIdentity(target?.accountIdentity ?? admittedIdentity)
+            return true
+          } catch {
+            return false
+          }
+        }
+        const initialTarget = claudeRuntimeTarget
+        const promise = runClaudeChat({
+          ...(claudeRuntimeTarget ? { initialTarget: claudeRuntimeTarget } : {}),
+          failoverChain: claudeFailoverChain,
+          ...(!isolated
+            ? {
+                resolveNextTarget: async (input: { attemptedProviderIds: ReadonlySet<string>; admit?: boolean }) => {
+                  const resolved = await resolveClaudeRuntimeTarget({
+                    logicalProviderId: selectedClaudeProviderId,
+                    modelId: selectedClaudeModelId,
+                    runtimeModelId: resolvedClaudeModelId,
+                    reasoningEffort,
+                    fastMode,
+                    chain: claudeFailoverChain,
+                    ...input,
+                    attemptedProviderIds: new Set([
+                      ...input.attemptedProviderIds,
+                      ...claudeFailoverChain.filter(claudePhysicalIdentityIsChanging),
+                    ]),
+                    signal: controller.signal,
+                  })
+                  return resolved.ok ? { ...resolved, target: { ...resolved.target, maestrlyUltra } } : resolved
+                },
+              }
+            : {}),
+          onEffectiveTargetChanged: (target) => {
+            if (controller.signal.aborted || (!run.allowClaudePersistence && !isolated)) return
+            effectiveTarget = target
+            run.effectiveProviderId = target.providerId
+            run.claudeSessionProviderId = target.providerId
+            run.claudeSessionAccountId = target.accountId
+            run.claudeIdentity = target.accountIdentity
+            run.claudeSessionId = undefined
+            observeTurnContextWindow(target.contextWindow)
+          },
+          onFailoverTransition: (event) => {
+            chatDiag({
+              type: 'subscription-failover',
+              conversationId,
+              ...event,
+            })
+            send(`chat:subscription-failover:${conversationId}`, event)
+          },
           conversationId,
           projectId: conv.workspaceId,
           cwd: conv.cwd,
           selection,
-          resolvedModelId:
-            isolated && frozenProfile?.resolvedModelId
-              ? frozenProfile.resolvedModelId
-              : (claudeModel.resolvedModel ?? claudeModel.value),
+          resolvedModelId: resolvedClaudeModelId,
+          behaviorProfile: admittedBehaviorProfile,
           ...(isolated && frozenProfile?.resolvedModelId
             ? { frozenResolvedModelId: frozenProfile.resolvedModelId }
             : {}),
@@ -4165,37 +4618,41 @@ async function startSend(
           contextWindow: turnContextWindow,
           ...(runnerMessageMeta ? { messageMeta: runnerMessageMeta } : {}),
           compactHistory: compactActiveHistory,
-          onModelContextWindow: (contextWindow) => {
-            manager.observeModelContextWindow(selectedClaudeModelId, contextWindow)
-            if (claudeModel.resolvedModel) {
-              manager.observeModelContextWindow(claudeModel.resolvedModel, contextWindow)
-            }
+          onModelContextWindow: (contextWindow, target = effectiveTarget) => {
+            if (target && !canPersist(target) && !isolated) return
+            observeTurnContextWindow(contextWindow)
+            const owner = target?.manager ?? manager
+            owner.observeModelContextWindow(selectedClaudeModelId, contextWindow)
+            owner.observeModelContextWindow(target?.runtimeModelId ?? resolvedClaudeModelId, contextWindow)
           },
-          onSessionReady: (sessionId) => {
-            if (!run.allowClaudePersistence || (!selectionAccountId && claudeIdentityTransitionPromise)) return false
-            try {
-              manager.assertAccountIdentity(admittedIdentity)
-            } catch {
-              return false
-            }
+          onSessionReady: (sessionId, target = effectiveTarget) => {
+            if (!canPersist(target)) return false
             run.claudeSessionId = sessionId
+            run.claudeSessionProviderId = target?.providerId ?? selectedClaudeProviderId
+            run.claudeSessionAccountId = target ? target.accountId : selectionAccountId
             return true
           },
-          canPersistSession: () => {
-            if (!run.allowClaudePersistence || (!selectionAccountId && claudeIdentityTransitionPromise)) return false
-            try {
-              manager.assertAccountIdentity(admittedIdentity)
-              return true
-            } catch {
-              return false
-            }
-          },
+          canPersistSession: canPersist,
           ...(isolated && reviewLoopMessageMeta
             ? {
                 ephemeralSession: true as const,
                 executionScope: reviewLoopMessageMeta.executionScope,
               }
             : {}),
+        })
+        claudeRuntimeLeaseTransferred = true
+        return promise.finally(() => {
+          // A runner that rejects before registering its attempt still returns the service-owned probe.
+          if (
+            initialTarget?.availabilityLease &&
+            getSubscriptionFailoverRouter().getHealth(initialTarget.providerId).halfOpenLeaseId ===
+              initialTarget.availabilityLease.leaseId
+          ) {
+            getSubscriptionFailoverRouter().confirmAttemptOther(
+              initialTarget.providerId,
+              initialTarget.availabilityLease
+            )
+          }
         })
       })()
     } else {
@@ -4207,10 +4664,12 @@ async function startSend(
         projectId: conv.workspaceId,
         cwd: conv.cwd,
         selection,
+        behaviorProfile: admittedBehaviorProfile,
         broker: getBroker(),
         questionBroker: getQuestionBroker(),
         emit,
         signal: controller.signal,
+        behaviorOverride: turnBehavior,
         ...(internalLoop?.reviewerRuntime ? { reviewerRuntime: internalLoop.reviewerRuntime } : {}),
         assistantMessageId,
         assistantCreatedAt,
@@ -4225,13 +4684,10 @@ async function startSend(
               reasoningOverride: frozenProfile?.reasoning ?? 'off',
               // Frozen EFFECT (after resolving Ultra): the runner requires equality with live resolution.
               frozenReasoningEffort: frozenProfile?.reasoningEffort,
-              modeOverride: internalTurnMode,
               ...(typeof frozenProfile?.fastMode === 'boolean' ? { fastModeOverride: frozenProfile.fastMode } : {}),
             }
           : {}),
-        ...(maestroTurn
-          ? { behaviorOverride: 'maestro' as const, maestro: maestroTurn, maestroLive: run.maestroLive }
-          : {}),
+        ...(maestroTurn ? { maestro: maestroTurn, maestroLive: run.maestroLive } : {}),
         ...(isolated && reviewLoopMessageMeta
           ? {
               ephemeralSession: true as const,
@@ -4296,6 +4752,7 @@ async function startSend(
           : hadError || wasInterrupted
             ? ('error' as const)
             : ('success' as const)
+        if (outcome === 'error') markAcceptedSteeringFailed()
         maestroTerminalStatus = controller.signal.aborted
           ? 'aborted'
           : wasInterrupted
@@ -4339,6 +4796,7 @@ async function startSend(
       })
       .catch((e) => {
         maestroTerminalStatus = controller.signal.aborted ? 'aborted' : 'error'
+        if (!controller.signal.aborted) markAcceptedSteeringFailed()
         if (run.messageId) cancelTurnDelegations(conversationId, run.messageId)
         try {
           opts?.onComplete?.({ planSubmitted: false, outcome: controller.signal.aborted ? 'cancelled' : 'error' })
@@ -4350,12 +4808,12 @@ async function startSend(
           : useClaudeSubscription
             ? claudeSubscriptionErrorMessage(e)
             : useGrokSubscription
-                ? grokSubscriptionErrorMessage(e)
-                : e instanceof ChatConfigError
+              ? grokSubscriptionErrorMessage(e)
+              : e instanceof ChatConfigError
+                ? e.message
+                : e instanceof Error
                   ? e.message
-                  : e instanceof Error
-                    ? e.message
-                    : String(e)
+                  : String(e)
         const ev: ChatStreamEvent = {
           kind: 'error',
           messageId: run.messageId || undefined,
@@ -4382,6 +4840,7 @@ async function startSend(
         // Release the slot BEFORE 'done' so the next queued turn does not get "busy"; 'done' is the ONLY
         // turn-end signal (the renderer advances the queue only here) — avoids double triggering (finish + done).
         run.maestroLive?.finish(maestroTerminalStatus)
+        applyCodexTurnControl(null)
         // Native threads/sessions persisted by this turn's delegations have served their purpose (resume applies
         // only within the turn). Release is best-effort and never blocks completion: failures remain in
         // cleanup tombstones for the sweeper.
@@ -4454,6 +4913,7 @@ async function startSend(
     throw error
   } finally {
     settleCodexRuntimeLeaseIfUnowned()
+    settleClaudeRuntimeLeaseIfUnowned()
     releaseConversationOperation(conversationId, operation)
     // Exit without a durable message → sidecars created during this admission would be orphaned (no owner row).
     if (!messageDurable && createdArtifactIds.length) {
@@ -4638,7 +5098,7 @@ async function invalidateActiveGitHubCopilotRun(conversationId: string, run: Act
 async function invalidateActiveClaudeRun(conversationId: string, run: ActiveRun): Promise<void> {
   run.allowClaudePersistence = false
   stop(conversationId)
-  await waitForRuns([run])
+  await run.done
   await deleteClaudeSessionForConversation(conversationId)
 }
 
@@ -4717,14 +5177,38 @@ async function resetGitHubCopilotAccountSessions(): Promise<void> {
   await deleteAllManagedGitHubCopilotSessions(undefined, { accountId: null })
 }
 
-async function resetClaudeAccountSessions(): Promise<void> {
-  getClaudeSubscriptionManager().abortAllQueries()
-  cancelPendingClaudeOperations()
-  const runs = [...active.entries()].filter(
-    ([, run]) => isClaudeSubscriptionProvider(run.providerId) && subscriptionAccountId(run.providerId) === null
+async function resetPhysicalClaudeAccount(providerId: string, accountId: string | null): Promise<void> {
+  const operations = new Set(
+    [...pendingConversationOperations.values()].filter(
+      (operation) => pendingPhysicalProviderId(operation) === providerId
+    )
   )
-  await Promise.all(runs.map(([conversationId, run]) => invalidateActiveClaudeRun(conversationId, run)))
-  await deleteAllManagedClaudeSessions(undefined, { accountId: null })
+  const attempts = listClaudeAttempts().filter((attempt) => attempt.providerId === providerId)
+  for (const attempt of attempts) {
+    const operation = attempt.conversationId ? pendingConversationOperations.get(attempt.conversationId) : undefined
+    if (operation) operations.add(operation)
+    attempt.abort(new Error('Claude account changed'))
+  }
+  for (const operation of operations) operation.controller.abort(new Error('Claude account changed'))
+  getClaudeSubscriptionManager(accountId).abortAllQueries()
+  const runs = [...active.entries()].filter(([, run]) => runUsesPhysicalProvider(run, providerId))
+  for (const [conversationId, run] of runs) {
+    run.allowClaudePersistence = false
+    stop(conversationId)
+  }
+  // Identity mutation must wait for actual finally/release, including helpers before root admission.
+  await Promise.all([
+    ...[...operations].map((operation) => operation.done),
+    ...attempts.map((attempt) => attempt.done),
+    ...runs.map(([, run]) => run.done),
+  ])
+  await deleteAllManagedClaudeSessions(undefined, { accountId })
+  getSubscriptionFailoverRouter().resetProvider(providerId)
+}
+
+async function resetClaudeAccountSessions(): Promise<void> {
+  cancelPendingClaudeOperations()
+  await resetPhysicalClaudeAccount(subscriptionProviderIdFor('claude-subscription', null), null)
 }
 
 async function resetGrokAccountSessions(): Promise<void> {
@@ -4743,6 +5227,10 @@ async function resetGrokAccountSessions(): Promise<void> {
 
 /** Identity boundary for an additional SLOT: abort turns PHYSICALLY using the account and delete only its threads/sessions. */
 async function resetSubscriptionAccountState(providerId: string, accountId: string): Promise<void> {
+  if (isClaudeSubscriptionProvider(providerId)) {
+    await resetPhysicalClaudeAccount(providerId, accountId)
+    return
+  }
   const matchesLogical = (candidate: string | null | undefined) =>
     !!candidate && subscriptionAccountId(candidate) === accountId
   const helperOperations = isCodexSubscriptionProvider(providerId) ? abortPendingCodexHelperOperations(providerId) : []
@@ -4772,12 +5260,6 @@ async function resetSubscriptionAccountState(providerId: string, accountId: stri
   if (isGitHubCopilotSubscriptionProvider(providerId)) {
     await Promise.all(runs.map(([conversationId, run]) => invalidateActiveGitHubCopilotRun(conversationId, run)))
     await deleteAllManagedGitHubCopilotSessions(undefined, { accountId })
-    return
-  }
-  if (isClaudeSubscriptionProvider(providerId)) {
-    getClaudeSubscriptionManager(accountId).abortAllQueries()
-    await Promise.all(runs.map(([conversationId, run]) => invalidateActiveClaudeRun(conversationId, run)))
-    await deleteAllManagedClaudeSessions(undefined, { accountId })
     return
   }
   if (isGrokSubscriptionProvider(providerId)) {
@@ -4976,6 +5458,8 @@ async function loginClaudeSubscriptionAccount(
 ): Promise<{ ok: boolean; status?: ChatSubscriptionAuthStatus; error?: string }> {
   if (!getSubscriptionAccount(accountId)) return { ok: false, error: 'unknown-account' }
   const providerId = subscriptionProviderIdFor('claude-subscription', accountId)
+  if (claudeSlotTransitions.has(providerId)) return { ok: false, error: 'busy' }
+  claudeSlotTransitions.add(providerId)
   const signingIn: ChatSubscriptionAuthStatus = { state: 'signing-in', authenticated: false, accountId }
   broadcastClaudeAccountAuth(accountId, signingIn)
   const manager = getClaudeSubscriptionManager(accountId)
@@ -4992,13 +5476,15 @@ async function loginClaudeSubscriptionAccount(
     }
     await deleteAllManagedClaudeSessions(undefined, { accountId })
     broadcastClaudeAccountAuth(accountId, toClaudeAuthStatus(completion.status, accountId))
-  })().catch((error) => {
-    broadcastClaudeAccountAuth(accountId, {
-      state: 'error',
-      authenticated: false,
-      error: claudeSubscriptionErrorMessage(error),
+  })()
+    .catch((error) => {
+      broadcastClaudeAccountAuth(accountId, {
+        state: 'error',
+        authenticated: false,
+        error: claudeSubscriptionErrorMessage(error),
+      })
     })
-  })
+    .finally(() => claudeSlotTransitions.delete(providerId))
   return { ok: true, status: signingIn }
 }
 
@@ -5006,6 +5492,8 @@ async function logoutClaudeSubscriptionAccount(
   accountId: string
 ): Promise<{ ok: boolean; status?: ChatSubscriptionAuthStatus; error?: string }> {
   const providerId = subscriptionProviderIdFor('claude-subscription', accountId)
+  if (claudeSlotTransitions.has(providerId)) return { ok: false, error: 'busy' }
+  claudeSlotTransitions.add(providerId)
   const manager = getClaudeSubscriptionManager(accountId)
   manager.cancelLogin()
   try {
@@ -5016,6 +5504,8 @@ async function logoutClaudeSubscriptionAccount(
     return { ok: completion.ok, status, ...(completion.error ? { error: completion.error } : {}) }
   } catch (error) {
     return { ok: false, error: claudeSubscriptionErrorMessage(error) }
+  } finally {
+    claudeSlotTransitions.delete(providerId)
   }
 }
 
@@ -5108,6 +5598,10 @@ async function removeSubscriptionAccountSlot(accountId: string): Promise<{ ok: b
   const account = getSubscriptionAccount(accountId)
   if (!account) return { ok: false, error: 'unknown-account' }
   const providerId = subscriptionProviderIdFor(account.kind, accountId)
+  if (account.kind === 'claude-subscription') {
+    if (claudeSlotTransitions.has(providerId)) return { ok: false, error: 'busy' }
+    claudeSlotTransitions.add(providerId)
+  }
   try {
     await resetSubscriptionAccountState(providerId, accountId)
     if (account.kind === 'codex-subscription') {
@@ -5142,6 +5636,8 @@ async function removeSubscriptionAccountSlot(accountId: string): Promise<{ ok: b
     return { ok: true }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    claudeSlotTransitions.delete(providerId)
   }
 }
 
@@ -5203,11 +5699,16 @@ interface CompactOpts {
   signal?: AbortSignal
   persist?: boolean
   contextWindow?: number
+  claudeFailoverChain?: readonly string[]
+  claudeExecutionAxes?: Pick<ClaudeRuntimeTarget, 'reasoningEffort' | 'fastMode'>
   operation?: PendingConversationOperation
   /** Mid-turn compaction of an isolated execution (review-loop): reads only the execution transcript. */
   executionId?: string
   /** Frozen profile (never selectionFor/live prefs). */
   selectionOverride?: FrozenChatSelection
+  /** Behavior and canonical identity already frozen by an active turn admission. */
+  behaviorProfile?: FableBehaviorProfile | null
+  resolvedModelId?: string
   /** Never retires the main conversation's native binding. */
   skipRetireBinding?: boolean
 }
@@ -5277,6 +5778,46 @@ export async function compactReserved(
       }
     : selectionFor(conversationId)
   if (!selection?.providerId || !selection.modelId) return { ok: false, error: 'no-model' }
+  const compactClaudeChain = isClaudeSubscriptionProvider(selection.providerId)
+    ? frozen
+      ? [selection.providerId]
+      : (opts.claudeFailoverChain ?? freezeFailoverChain(selection.providerId))
+    : []
+  let compactResolvedModelId = opts.resolvedModelId ?? frozen?.resolvedModelId
+  let compactClaudeTarget: ClaudeRuntimeTarget | undefined
+  if (isClaudeSubscriptionProvider(selection.providerId) && !frozen) {
+    const prefs = getConvUiPrefs(conversationId).chat
+    const resolved = await resolveClaudeRuntimeTarget({
+      logicalProviderId: selection.providerId,
+      modelId: selection.modelId,
+      runtimeModelId: compactResolvedModelId,
+      reasoningEffort: opts.claudeExecutionAxes ? opts.claudeExecutionAxes.reasoningEffort : prefs?.reasoning,
+      fastMode: opts.claudeExecutionAxes ? opts.claudeExecutionAxes.fastMode : prefs?.fastMode === true,
+      chain: compactClaudeChain,
+      attemptedProviderIds: new Set(),
+      admit: false,
+      signal: opts.signal ?? new AbortController().signal,
+    })
+    if (!resolved.ok) return { ok: false, error: resolved.message }
+    compactClaudeTarget = resolved.target
+    if (opts.operation) opts.operation.effectiveProviderId = resolved.target.providerId
+    if (resolved.target.availabilityLease)
+      getSubscriptionFailoverRouter().confirmAttemptOther(resolved.target.providerId, resolved.target.availabilityLease)
+    compactResolvedModelId = resolved.target.runtimeModelId
+  }
+  const compactBehaviorResolution = resolveFableBehaviorProfile({
+    requestedModelId: selection.modelId,
+    resolvedModelId: compactResolvedModelId,
+    enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
+    frozen: frozen != null,
+    frozenProfileId: frozen?.behaviorProfileId,
+  })
+  if (compactBehaviorResolution.reason === 'frozen-profile-mismatch') {
+    return { ok: false, error: 'executor-unavailable' }
+  }
+  const compactBehaviorProfile =
+    opts.behaviorProfile === undefined ? compactBehaviorResolution.profile : opts.behaviorProfile
+  const compactSystem = compileFableCompactionSystem(COMPACT_SYSTEM, compactBehaviorProfile)
   const history = opts.executionId
     ? listExecutionContextMessages(conversationId, opts.executionId)
     : listConversationContextMessages(conversationId)
@@ -5294,13 +5835,19 @@ export async function compactReserved(
   if (opts.persist !== false && !opts.allowActive && activeContext.messages.length < 2) {
     return { ok: false, error: 'too-short' }
   }
+  let observedClaudeUsage: NormalizedAiUsage | undefined
+  let observedClaudeCost = 0
+  let observedClaudeCostKnown = false
+  let observedClaudeCostComplete = true
   try {
     const compactSignal = opts.signal
       ? AbortSignal.any([opts.signal, AbortSignal.timeout(10 * 60_000)])
       : AbortSignal.timeout(10 * 60_000)
     const contextWindow =
       opts.contextWindow ??
-      (await effectiveModelMeta(selection.modelId, selection.providerId, compactSignal)).meta?.contextWindow
+      (compactClaudeTarget
+        ? (compactClaudeTarget.contextWindow ?? undefined)
+        : (await effectiveModelMeta(selection.modelId, selection.providerId, compactSignal)).meta?.contextWindow)
     const compactAccountId = subscriptionAccountId(selection.providerId)
     // Frozen profile: revalidate identity/availability IMMEDIATELY before any summary
     // call. Account/credential changes during the round ABORT compaction (the turn ends) — never
@@ -5336,7 +5883,7 @@ export async function compactReserved(
               client: target.client,
               cwd: conv.cwd,
               modelId: target.runtimeModelId,
-              system: COMPACT_SYSTEM,
+              system: compactSystem,
               prompt,
               signal: operationSignal,
               conversationId,
@@ -5372,41 +5919,91 @@ export async function compactReserved(
           conversationId,
           cwd: conv.cwd,
           modelId: selection.modelId,
-          system: COMPACT_SYSTEM,
+          system: compactSystem,
           prompt,
           signal: compactSignal,
           // Frozen profile: round's EFFECTIVE EFFORT (after resolving Ultra; never raw or live prefs).
           ...(frozen?.reasoningEffort ? { effort: frozen.reasoningEffort } : {}),
         })
     } else if (isClaudeSubscriptionProvider(selection.providerId)) {
-      if (!compactAccountId && (claudeLoginPending || claudeIdentityTransitionPromise))
-        return { ok: false, error: 'no-key' }
-      const manager = getClaudeSubscriptionManager(compactAccountId)
-      const status = await manager.status({ refresh: true })
-      if (!status.authenticated || !status.accountFingerprint) return { ok: false, error: 'no-key' }
-      const identity = frozen
-        ? {
-            // Frozen profile: identity from freeze (summarizer assertAccountIdentity aborts if changed).
-            fingerprint: frozen.identityFingerprint ?? status.accountFingerprint,
-            epoch: frozen.identityEpoch ?? status.accountEpoch,
-          }
-        : { fingerprint: status.accountFingerprint, epoch: status.accountEpoch }
-      summarize = (prompt) =>
-        summarizeWithClaudeRuntime({
-          manager,
-          accountIdentity: identity,
-          cwd: conv.cwd,
-          // Frozen profile: use the effective ID resolved at freeze, never the mutable conversation alias.
-          modelId: frozen?.resolvedModelId ?? selection.modelId,
-          system: COMPACT_SYSTEM,
-          prompt,
-          signal: compactSignal,
-          // Frozen profile: round's EFFECTIVE EFFORT (after resolving Ultra; never raw or live prefs);
-          // normal path rereads prefs (current behavior).
-          effort: frozen ? frozen.reasoningEffort : getConvUiPrefs(conversationId).chat?.reasoning,
-          // Frozen profile: carry effective Fast Mode; manual path keeps current options.
-          ...(frozen ? { fastMode: frozen.fastMode } : {}),
-        })
+      if (!frozen) {
+        const chain = compactClaudeChain
+        summarize = (prompt) =>
+          runClaudeEphemeralWithFailover({
+            logicalProviderId: selection.providerId,
+            modelId: selection.modelId,
+            runtimeModelId: compactResolvedModelId,
+            reasoningEffort: compactClaudeTarget?.reasoningEffort,
+            fastMode: compactClaudeTarget?.fastMode === true,
+            chain,
+            signal: compactSignal,
+            conversationId,
+            extractAttemptUsage: extractIsolatedSummaryAttemptUsage,
+            mergeAttemptUsage: mergeIsolatedSummaryAttemptUsage,
+            onAttemptUsage: ({ target, attempt, usage, runtimeEstimatedCostUsd }) => {
+              observedClaudeUsage ??= { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, totalInput: 0 }
+              for (const key of ['input', 'output', 'cacheRead', 'cacheCreate', 'totalInput'] as const)
+                observedClaudeUsage[key] += usage[key]
+              if (runtimeEstimatedCostUsd != null) {
+                observedClaudeCost += runtimeEstimatedCostUsd
+                observedClaudeCostKnown = true
+              } else if (usage.totalInput || usage.output) observedClaudeCostComplete = false
+              recordModelCallUsage({
+                runtime: 'claude-subscription',
+                providerId: target.providerId,
+                modelId: target.runtimeModelId,
+                conversationId,
+                agent: 'portable-compaction',
+                attempt,
+                usage,
+              })
+            },
+            operation: (target, signal) =>
+              summarizeWithClaudeRuntime({
+                manager: target.manager,
+                accountIdentity: target.accountIdentity,
+                cwd: conv.cwd,
+                modelId: target.runtimeModelId,
+                system: compactSystem,
+                prompt,
+                signal,
+                effort: target.reasoningEffort,
+                fastMode: target.fastMode,
+              }),
+          })
+      } else {
+        if (!compactAccountId && (claudeLoginPending || claudeIdentityTransitionPromise))
+          return { ok: false, error: 'no-key' }
+        const manager = getClaudeSubscriptionManager(compactAccountId)
+        const status = await manager.status({ refresh: true })
+        if (!status.authenticated || !status.accountFingerprint) return { ok: false, error: 'no-key' }
+        const identity = frozen
+          ? {
+              // Frozen profile: identity from freeze (summarizer assertAccountIdentity aborts if changed).
+              fingerprint: frozen.identityFingerprint ?? status.accountFingerprint,
+              epoch: frozen.identityEpoch ?? status.accountEpoch,
+            }
+          : {
+              fingerprint: status.accountFingerprint,
+              epoch: status.accountEpoch,
+            }
+        summarize = (prompt) =>
+          summarizeWithClaudeRuntime({
+            manager,
+            accountIdentity: identity,
+            cwd: conv.cwd,
+            // Frozen profile: use the effective ID resolved at freeze, never the mutable conversation alias.
+            modelId: frozen?.resolvedModelId ?? selection.modelId,
+            system: compactSystem,
+            prompt,
+            signal: compactSignal,
+            // Frozen profile: round's EFFECTIVE EFFORT (after resolving Ultra; never raw or live prefs);
+            // normal path rereads prefs (current behavior).
+            effort: frozen ? frozen.reasoningEffort : getConvUiPrefs(conversationId).chat?.reasoning,
+            // Frozen profile: carry effective Fast Mode; manual path keeps current options.
+            ...(frozen ? { fastMode: frozen.fastMode } : {}),
+          })
+      }
     } else {
       if (isGrokSubscriptionProvider(selection.providerId)) {
         if (!compactAccountId && (grokLoginPending || grokIdentityTransitionPromise))
@@ -5435,7 +6032,7 @@ export async function compactReserved(
       summarize = async (prompt) => {
         const result = await generateText({
           model,
-          system: COMPACT_SYSTEM,
+          system: compactSystem,
           prompt,
           abortSignal: compactSignal,
           ...(frozenFastModeOptions ? { providerOptions: frozenFastModeOptions } : {}),
@@ -5501,7 +6098,20 @@ export async function compactReserved(
         : {}),
     }
   } catch (e) {
-    return { ok: false, error: e instanceof ChatConfigError ? e.message : e instanceof Error ? e.message : String(e) }
+    const usage = observedClaudeUsage ?? extractIsolatedSummaryAttemptUsage(e)
+    const partialCost = observedClaudeCostKnown
+      ? observedClaudeCostComplete
+        ? observedClaudeCost
+        : undefined
+      : (e as { runtimeEstimatedCostUsd?: number } | null)?.runtimeEstimatedCostUsd
+    return {
+      ok: false,
+      error: e instanceof ChatConfigError ? e.message : e instanceof Error ? e.message : String(e),
+      ...(usage ? { usage } : {}),
+      ...(typeof partialCost === 'number' && Number.isFinite(partialCost) && partialCost >= 0
+        ? { runtimeEstimatedCostUsd: partialCost }
+        : {}),
+    }
   }
 }
 
@@ -5666,6 +6276,11 @@ export async function resolveReviewLoopSelection(
     if (frozenEffort === null) return { ok: false, error: 'no-model' }
     reasoningEffort = frozenEffort
   }
+  const behaviorProfile = resolveFableBehaviorProfile({
+    requestedModelId: modelId,
+    resolvedModelId,
+    enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
+  }).profile
   return {
     ok: true,
     selection: {
@@ -5677,6 +6292,7 @@ export async function resolveReviewLoopSelection(
       fastMode,
       ...(serviceTier ? { serviceTier } : {}),
       ...(resolvedModelId ? { resolvedModelId } : {}),
+      behaviorProfileId: behaviorProfile?.id ?? null,
       ...(identityFingerprint ? { identityFingerprint } : {}),
       ...(typeof identityEpoch === 'number' ? { identityEpoch } : {}),
       ...(providerFingerprint ? { providerFingerprint } : {}),
@@ -5761,7 +6377,14 @@ async function revalidateGenericFrozenEffort(frozen: FrozenChatSelection): Promi
     const provider = getProvider(frozen.providerId)
     const catalogProviderId = provider ? catalogProviderForBaseURL(provider.baseURL) : null
     const meta = await getProviderModelMeta(frozen.modelId, catalogProviderId)
-    return meta?.reasoning === true && frozenEffortMatchesLiveCapabilities(frozen, meta.reasoningEfforts ?? [])
+    const advertised = meta?.reasoningEfforts ?? []
+    const efforts =
+      resolveChatHarnessMetadata(frozen.providerId, frozen.modelId, {
+        astraHarnessEnabled: getAppFlag('chat.astraHarness', true),
+      }).modelHarnessProfileId === 'openai-gpt-6-astra-v1'
+        ? advertised.filter((effort) => OPENAI_GPT6_ASTRA_MANIFEST.validReasoningEfforts.includes(effort))
+        : advertised
+    return meta?.reasoning === true && frozenEffortMatchesLiveCapabilities(frozen, efforts)
   } catch {
     return false
   }
@@ -5774,6 +6397,15 @@ async function revalidateGenericFrozenEffort(frozen: FrozenChatSelection): Promi
 export async function revalidateReviewLoopSelection(
   frozen: FrozenChatSelection
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  const behaviorResolution = resolveFableBehaviorProfile({
+    requestedModelId: frozen.modelId,
+    resolvedModelId: frozen.resolvedModelId,
+    frozen: true,
+    frozenProfileId: frozen.behaviorProfileId,
+  })
+  if (behaviorResolution.reason === 'frozen-profile-mismatch') {
+    return { ok: false, error: 'executor-unavailable' }
+  }
   const accountId = subscriptionAccountId(frozen.providerId)
   if (isCodexSubscriptionProvider(frozen.providerId)) {
     const status = await codexAuthStatus(false, undefined, accountId)
@@ -6790,8 +7422,104 @@ export function registerChatIpc(deps: ChatIpcDeps): void {
   deps.mhandle('chat:runtime', (_e, conversationId: string) =>
     typeof conversationId === 'string'
       ? chatRuntimeState(conversationId)
-      : { streaming: false, pendingPermissions: [], pendingQuestions: [] }
+      : {
+          streaming: false,
+          pendingPermissions: [],
+          pendingQuestions: [],
+          midTurnSteering: false,
+          liveReasoningUpdate: false,
+          activeHarnessProfile: null,
+        }
   )
+  deps.mhandle(
+    'chat:steer',
+    async (_e, rawConversationId: unknown, rawText: unknown, rawClientUserMessageId: unknown) => {
+      const conversationId = typeof rawConversationId === 'string' ? rawConversationId : ''
+      const text = typeof rawText === 'string' ? rawText : ''
+      const clientUserMessageId = typeof rawClientUserMessageId === 'string' ? rawClientUserMessageId : ''
+      if (
+        !conversationId ||
+        !text.trim() ||
+        text.length > 200_000 ||
+        !/^[a-zA-Z0-9_-]{8,128}$/.test(clientUserMessageId)
+      ) {
+        return { ok: false as const, error: 'invalid-input' as const }
+      }
+      const run = active.get(conversationId)
+      const control = run?.codexTurnControl
+      if (!run || !control || run.activeHarnessProfile !== 'openai-gpt-6-astra-v1' || !run.midTurnSteering) {
+        return { ok: false as const, error: 'target-unavailable' as const }
+      }
+      const existing = getChatMessage(conversationId, clientUserMessageId)
+      if (existing?.steering?.status === 'queued') return { ok: true as const, accepted: true as const }
+      if (existing) return { ok: false as const, error: 'duplicate-id' as const }
+      try {
+        const result = await control.steer(text, clientUserMessageId)
+        if (result !== 'accepted') return { ok: false as const, error: 'target-unavailable' as const }
+        const message: ChatMessage = {
+          id: clientUserMessageId,
+          conversationId,
+          role: 'user',
+          parts: [{ type: 'text', id: randomUUID(), text }],
+          steering: { status: 'queued' },
+          createdAt: Date.now(),
+        }
+        run.acceptedSteeringMessageIds.add(clientUserMessageId)
+        try {
+          upsertChatMessage(message)
+        } catch {
+          // The provider already accepted the input. Never report a pre-acceptance failure and auto-queue a
+          // duplicate; the transient bubble still makes the accepted instruction visible for this process.
+          chatDiag({
+            kind: 'codex-subscription-steering-service',
+            conv: conversationId,
+            profile: run.activeHarnessProfile,
+            result: 'accepted-persistence-failed',
+          })
+        }
+        run.send(`chat:delta:${conversationId}`, { kind: 'steering-accepted', message } satisfies ChatStreamEvent)
+        chatDiag({
+          kind: 'codex-subscription-steering-service',
+          conv: conversationId,
+          profile: run.activeHarnessProfile,
+          result: 'accepted',
+        })
+        return { ok: true as const, accepted: true as const }
+      } catch {
+        chatDiag({
+          kind: 'codex-subscription-steering-service',
+          conv: conversationId,
+          profile: run.activeHarnessProfile,
+          result: 'fallback',
+        })
+        return { ok: false as const, error: 'target-unavailable' as const }
+      }
+    }
+  )
+  deps.mhandle('chat:update-live-reasoning', async (_e, rawConversationId: unknown, rawEffort: unknown) => {
+    const conversationId = typeof rawConversationId === 'string' ? rawConversationId : ''
+    const effort = typeof rawEffort === 'string' ? sanitizeEffort(rawEffort) || 'off' : ''
+    const run = active.get(conversationId)
+    const control = run?.codexTurnControl
+    if (
+      !conversationId ||
+      !effort ||
+      !run ||
+      !control ||
+      run.activeHarnessProfile !== 'openai-gpt-6-astra-v1' ||
+      !run.liveReasoningUpdate
+    ) {
+      return { ok: false as const, error: 'target-unavailable' as const }
+    }
+    try {
+      const result = await control.updateReasoning(effort)
+      return result === 'applied'
+        ? { ok: true as const, applied: true as const }
+        : { ok: false as const, error: result as 'target-unavailable' | 'invalid-effort' }
+    } catch {
+      return { ok: false as const, error: 'target-unavailable' as const }
+    }
+  })
   deps.mhandle(
     'chat:maestro-live:post',
     (
@@ -7766,6 +8494,11 @@ export function registerChatIpc(deps: ChatIpcDeps): void {
     setAppFlag('chat.openAIHarness', enabled === true)
     return { ok: true }
   })
+  // Dedicated Astra profile kill switch. The selected model is unchanged; the next admitted turn resolves default.
+  deps.mhandle('chat:set-astra-harness', (_e, enabled: boolean) => {
+    setAppFlag('chat.astraHarness', enabled === true)
+    return { ok: true }
+  })
 
   // API key (write-only; renderer never receives the value).
   deps.mhandle('chat:key-set', (_e, providerId: string, key: string) => {
@@ -7863,17 +8596,19 @@ export function registerChatIpc(deps: ChatIpcDeps): void {
     return { ok: true }
   })
 
-  // Behavior mode per conversation (agent | plan | ask).
+  // Standard behavior mode per conversation.
   deps.mhandle('chat:get-mode', (_e, conversationId: string) =>
     typeof conversationId === 'string' ? modeFor(conversationId) : 'agent'
   )
-  deps.mhandle('chat:set-mode', (_e, conversationId: string, mode: 'agent' | 'plan' | 'ask') => {
-    if (typeof conversationId === 'string' && getConversation(conversationId)?.experience === 'maestro') {
+  deps.mhandle('chat:set-mode', (_e, conversationId: string, mode: unknown) => {
+    if (typeof conversationId !== 'string' || !conversationId || !getConversation(conversationId)) {
+      return { ok: false, error: 'invalid-conversation' }
+    }
+    if (getConversation(conversationId)?.experience === 'maestro') {
       return { ok: false, error: 'maestro-experience' }
     }
-    if (typeof conversationId === 'string' && (mode === 'agent' || mode === 'plan' || mode === 'ask')) {
-      patchConvChat(conversationId, { mode })
-    }
+    if (!isChatMode(mode)) return { ok: false, error: 'invalid-mode' }
+    patchConvChat(conversationId, { mode })
     return { ok: true }
   })
 
@@ -7993,6 +8728,8 @@ export function disposeChat(): Promise<void> {
     const pairedReviewDispose = pairedReviewLoopCoordinator?.dispose() ?? Promise.resolve()
     for (const operation of pendingSnapshot) operation.controller.abort(new Error('Chat service is shutting down'))
     abortAllCodexEphemeralAttempts()
+    const claudeAttempts = listClaudeAttempts()
+    for (const attempt of claudeAttempts) attempt.abort(new Error('Chat service is shutting down'))
     for (const entry of internalTurns.values()) entry.cancel()
     const snapshot = [...active.entries()]
     const ids = new Set(snapshot.map(([id]) => id))
@@ -8002,6 +8739,10 @@ export function disposeChat(): Promise<void> {
     await Promise.all([
       waitForRuns(snapshot.map(([, run]) => run)),
       waitForAllCodexEphemeralAttemptsBestEffort(pendingSnapshot.map((operation) => operation.done)),
+      Promise.all([
+        ...claudeAttempts.map((attempt) => attempt.done),
+        ...snapshot.filter(([, run]) => isClaudeSubscriptionProvider(run.providerId)).map(([, run]) => run.done),
+      ]),
       pairedReviewDispose,
       maestroConfiguratorService.stop(),
     ])

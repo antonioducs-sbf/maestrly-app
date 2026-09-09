@@ -4,7 +4,7 @@ import { scrollChatSearchResult } from '../../src/renderer/lib/chat-search-scrol
 interface Match {
   id: string
   revealed: boolean
-  scrollIntoView: ReturnType<typeof vi.fn>
+  scrollIntoView: ReturnType<typeof vi.fn<(options: { block: 'center'; behavior: 'auto' }) => void>>
 }
 
 function match(id: string, revealed: boolean): Match {

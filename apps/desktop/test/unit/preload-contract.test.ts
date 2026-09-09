@@ -150,7 +150,7 @@ describe('preload API — exposure', () => {
 
   it('preserves the public preload API inventory', () => {
     const keys = Object.keys(api)
-    expect(keys).toHaveLength(359)
+    expect(keys).toHaveLength(362)
     expect(keys.sort()).toMatchSnapshot()
   })
 
@@ -544,6 +544,13 @@ describe('channel cross-check group:* (preload -> main)', () => {
 // Check settings and runtime prefixes separately.
 // ---------------------------------------------------------------------------
 describe('preload API — Chat settings wrappers', () => {
+  it('forwards Design mode through the existing chat mode IPC channel', () => {
+    api.chatSetMode('conversation-design', 'design')
+    expect(invokeSpy).toHaveBeenCalledWith('chat:set-mode', 'conversation-design', 'design')
+    api.chatGetMode('conversation-design')
+    expect(invokeSpy).toHaveBeenCalledWith('chat:get-mode', 'conversation-design')
+  })
+
   it('setDrawerShortcut(binding) -> settings:drawer-shortcut-set (send)', () => {
     const binding = { key: 'd', mods: ['meta', 'control'] as Array<'meta' | 'control'> }
     api.setDrawerShortcut(binding)
@@ -816,6 +823,20 @@ describe('preload API — chat pagination (#559)', () => {
   it('chatSetOpenAIHarness(enabled) -> chat:set-openai-harness preserves the boolean', () => {
     api.chatSetOpenAIHarness(false)
     expect(invokeSpy).toHaveBeenCalledWith('chat:set-openai-harness', false)
+  })
+
+  it('exposes Astra kill switch and active-turn controls without remote identifiers', () => {
+    api.chatSetAstraHarness(false)
+    expect(invokeSpy).toHaveBeenLastCalledWith('chat:set-astra-harness', false)
+    api.chatSteer('conversation-1', 'also verify lint', 'client-message-1')
+    expect(invokeSpy).toHaveBeenLastCalledWith(
+      'chat:steer',
+      'conversation-1',
+      'also verify lint',
+      'client-message-1'
+    )
+    api.chatUpdateLiveReasoning('conversation-1', 'ultra')
+    expect(invokeSpy).toHaveBeenLastCalledWith('chat:update-live-reasoning', 'conversation-1', 'ultra')
   })
 
   it('subagent profiles preserve channels and argument order', () => {

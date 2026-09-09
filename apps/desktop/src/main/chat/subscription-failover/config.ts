@@ -1,13 +1,14 @@
 import {
+  isSubscriptionFailoverProviderId,
   subscriptionAccountId,
   subscriptionBaseProviderId,
   type ChatSubscriptionFailoverConfigV1,
   type ChatSubscriptionFailoverRoute,
 } from '../../../shared/chat'
 import { getAppSetting, setAppSetting } from '../../store'
-import { isCodexSubscriptionProvider, listAvailableChatProviders } from '../catalog'
+import { listAvailableChatProviders } from '../catalog'
 
-export const SUPPORTED_FAILOVER_KINDS = ['codex-subscription'] as const
+export const SUPPORTED_FAILOVER_KINDS = ['codex-subscription', 'claude-subscription'] as const
 export const FAILOVER_CONFIG_KEY = 'chat.subscriptionFailover.v1'
 /** Mirrors `CODEX_SUBSCRIPTION_PROVIDER_ID` without importing it — incomplete catalog mocks cannot break buildConfig. */
 const DEFAULT_CODEX_PROVIDER_ID = 'builtin_codex_subscription'
@@ -22,9 +23,9 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-/** Valid primary: resembles Codex (base or @acc_ slot) and, if a catalog is supplied, exists in it. */
+/** Valid primary: resembles Claude or Codex (base or @acc_ slot) and, if a catalog is supplied, exists in it. */
 function isAcceptablePrimary(primaryProviderId: string, knownProviderIds: ReadonlySet<string>): boolean {
-  if (!isCodexSubscriptionProvider(primaryProviderId)) return false
+  if (!isSubscriptionFailoverProviderId(primaryProviderId)) return false
   if (knownProviderIds.size === 0) return true
   return knownProviderIds.has(primaryProviderId)
 }
@@ -38,7 +39,7 @@ function normalizeFallbackIds(primaryProviderId: string, fallbackProviderIds: un
     if (!isNonEmptyString(item)) continue
     const id = item.trim()
     if (seen.has(id)) continue
-    if (!isCodexSubscriptionProvider(id)) continue
+    if (!isSubscriptionFailoverProviderId(id)) continue
     if (subscriptionBaseProviderId(id) !== base) continue
     seen.add(id)
     out.push(id)
@@ -90,11 +91,12 @@ export function sanitizeFailoverConfig(
   return { version: 1, routes }
 }
 
-function knownCodexProviderIds(): Set<string> {
+function knownFailoverProviderIds(): Set<string> {
   const known = new Set<string>()
   known.add(DEFAULT_CODEX_PROVIDER_ID)
+  known.add('builtin_claude_subscription')
   for (const provider of listAvailableChatProviders()) {
-    if (isCodexSubscriptionProvider(provider.id)) known.add(provider.id)
+    if (isSubscriptionFailoverProviderId(provider.id)) known.add(provider.id)
   }
   return known
 }
@@ -114,10 +116,10 @@ function saveConfig(config: ChatSubscriptionFailoverConfigV1): void {
 }
 
 function loadSanitized(extraKnownIds?: Iterable<string>): ChatSubscriptionFailoverConfigV1 {
-  const known = knownCodexProviderIds()
+  const known = knownFailoverProviderIds()
   if (extraKnownIds) {
     for (const id of extraKnownIds) {
-      if (isCodexSubscriptionProvider(id)) known.add(id)
+      if (isSubscriptionFailoverProviderId(id)) known.add(id)
     }
   }
   return sanitizeFailoverConfig(readRawConfig(), known)
@@ -135,8 +137,8 @@ export function getFailoverRoute(primaryProviderId: string): ChatSubscriptionFai
 
 export function setFailoverRoute(route: ChatSubscriptionFailoverRoute): ChatSubscriptionFailoverRoute {
   const primaryProviderId = typeof route?.primaryProviderId === 'string' ? route.primaryProviderId.trim() : ''
-  if (!isCodexSubscriptionProvider(primaryProviderId)) {
-    throw new Error('primaryProviderId must be a Codex subscription provider')
+  if (!isSubscriptionFailoverProviderId(primaryProviderId)) {
+    throw new Error('primaryProviderId must be a Claude or Codex subscription provider')
   }
   const normalized = normalizeRoute({
     primaryProviderId,
@@ -155,7 +157,12 @@ function matchesRemovedAccount(id: string, target: string): boolean {
   const idAccount = subscriptionAccountId(id)
   if (idAccount && idAccount === target) return true
   const targetAccount = subscriptionAccountId(target)
-  if (targetAccount && idAccount === targetAccount) return true
+  if (
+    targetAccount &&
+    idAccount === targetAccount &&
+    subscriptionBaseProviderId(id) === subscriptionBaseProviderId(target)
+  )
+    return true
   return false
 }
 
@@ -172,19 +179,19 @@ export function removeAccountFromFailoverConfig(providerIdOrAccountId: string): 
       for (const item of routes) {
         if (!item || typeof item !== 'object' || Array.isArray(item)) continue
         const primary = (item as { primaryProviderId?: unknown }).primaryProviderId
-        if (isNonEmptyString(primary) && isCodexSubscriptionProvider(primary.trim())) {
+        if (isNonEmptyString(primary) && isSubscriptionFailoverProviderId(primary.trim())) {
           looseKnown.add(primary.trim())
         }
         const fallbacks = (item as { fallbackProviderIds?: unknown }).fallbackProviderIds
         if (Array.isArray(fallbacks)) {
           for (const fb of fallbacks) {
-            if (isNonEmptyString(fb) && isCodexSubscriptionProvider(fb.trim())) looseKnown.add(fb.trim())
+            if (isNonEmptyString(fb) && isSubscriptionFailoverProviderId(fb.trim())) looseKnown.add(fb.trim())
           }
         }
       }
     }
   }
-  for (const id of knownCodexProviderIds()) looseKnown.add(id)
+  for (const id of knownFailoverProviderIds()) looseKnown.add(id)
   looseKnown.add(target)
   const current = sanitizeFailoverConfig(raw, looseKnown)
   const routes = current.routes

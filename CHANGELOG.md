@@ -1,29 +1,33 @@
 # Changelog
 
-All notable changes to this project are documented in this file. The format is
-based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versioned
-releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+User-visible changes by version. Downloads are on
+[GitHub Releases](https://github.com/antonioducs/maestrly-app/releases).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-09
+
 ### Added
 
-- Initial public source baseline for the local-first Maestrly desktop.
-- Chat, Maestro orchestration, Git/worktrees, terminal, embedded
-  editor and browser, notes, memory, MCP, settings, i18n, export/reset, and
-  optional Local ML capabilities.
-- Reproducible dependency installation, cross-platform CI, security checks, and
-  native package-smoke workflows.
-- Tag-driven GitHub Releases with Linux x64, Windows x64, and signed/notarized
-  macOS arm64 artifacts plus verified SHA-256 checksums.
+- Ordered Claude subscription account rotation for chat, subagents, summaries,
+  and image interpretation, with configurable fallback accounts.
 
-### Security
+### Fixed
 
-- Local credentials remain in the Electron main process and use operating-system
-  protected storage.
-- CI scans complete Git history for secrets and enforces an exact dependency
-  advisory policy.
-- Package verification rejects source leakage, unexpected runtime content, and
-  missing legal notices.
+- Preserve conversation context and completed tool results when switching
+  subscription accounts after usage limits are reached.
+- Make GPT account failover transparent and preserve physical account ownership.
+- Harden archive extraction and web text parsing.
 
-This source preview has no supported public binary or automatic update channel.
+### Changed
+
+- Update compatible dependencies and development tools.
+
+## [0.2.0] - 2026-09-07
+
+### Added
+
+- GPT-6 Astra support for OpenAI API and ChatGPT subscription sessions, with
+  conversation continuity and context compaction.
+- Mid-turn text steering and live reasoning updates for subscription runtimes
+  that support them.

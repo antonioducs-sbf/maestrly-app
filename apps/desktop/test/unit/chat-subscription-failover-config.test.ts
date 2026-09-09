@@ -136,9 +136,13 @@ describe('subscription failover config', () => {
     expect(listFailoverRoutes()).toEqual([second])
   })
 
-  it('setFailoverRoute rejects non-Codex primary', () => {
+  it('setFailoverRoute rejects unsupported primary', () => {
     expect(() =>
-      setFailoverRoute({ primaryProviderId: CLAUDE, enabled: true, fallbackProviderIds: [CLAUDE_ACC] })
+      setFailoverRoute({
+        primaryProviderId: 'builtin_grok_subscription',
+        enabled: true,
+        fallbackProviderIds: [CLAUDE_ACC],
+      })
     ).toThrow(/Codex/)
     expect(settings.has(FAILOVER_CONFIG_KEY)).toBe(false)
   })
@@ -219,4 +223,33 @@ describe('subscription failover config', () => {
     )
     expect(listFailoverRoutes()).toEqual([{ primaryProviderId: ACC_A, enabled: true, fallbackProviderIds: [ACC_B] }])
   })
+})
+
+describe('Claude routes', () => {
+  it('preserves Codex v1 routes and freezes same-family Claude fallbacks without recursion', () => {
+    knownProviders.push({ id: CLAUDE }, { id: CLAUDE_ACC })
+    const next = `${CLAUDE}@acc_next`
+    setFailoverRoute({ primaryProviderId: BASE, enabled: true, fallbackProviderIds: [ACC_A] })
+    setFailoverRoute({
+      primaryProviderId: CLAUDE,
+      enabled: true,
+      fallbackProviderIds: [CLAUDE_ACC, BASE, CLAUDE_ACC, CLAUDE],
+    })
+    setFailoverRoute({ primaryProviderId: CLAUDE_ACC, enabled: true, fallbackProviderIds: [next] })
+    expect(freezeFailoverChain(BASE)).toEqual([BASE, ACC_A])
+    expect(freezeFailoverChain(CLAUDE)).toEqual([CLAUDE, CLAUDE_ACC])
+    removeAccountFromFailoverConfig(CLAUDE_ACC)
+    expect(freezeFailoverChain(CLAUDE)).toEqual([CLAUDE])
+    expect(freezeFailoverChain(BASE)).toEqual([BASE, ACC_A])
+  })
+})
+
+it('removes provider-scoped account references only from their own family', () => {
+  const codex = `${BASE}@acc_shared`
+  const claude = `${CLAUDE}@acc_shared`
+  setFailoverRoute({ primaryProviderId: BASE, enabled: true, fallbackProviderIds: [codex] })
+  setFailoverRoute({ primaryProviderId: CLAUDE, enabled: true, fallbackProviderIds: [claude] })
+  removeAccountFromFailoverConfig(claude)
+  expect(freezeFailoverChain(BASE)).toEqual([BASE, codex])
+  expect(freezeFailoverChain(CLAUDE)).toEqual([CLAUDE])
 })

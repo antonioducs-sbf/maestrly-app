@@ -38,7 +38,7 @@ The remainder of Maestrly is not relicensed by this notice.
 ## OpenAI Codex runtime
 
 The optional Codex subscription integration downloads the pinned, unmodified
-`@openai/codex` 0.153.2 target runtime directly from npm when the user enables
+`@openai/codex` 0.153.4 target runtime directly from npm when the user enables
 it. The lean application package does not contain that runtime. Its Apache 2.0
 license and attribution are recorded in
 [`apps/desktop/resources/licenses/openai-codex-runtime-NOTICE.txt`](apps/desktop/resources/licenses/openai-codex-runtime-NOTICE.txt)
@@ -69,7 +69,7 @@ Maestrly is not affiliated with or endorsed by GitHub.
 
 ## Anthropic Claude Agent SDK
 
-Maestrly integrates `@anthropic-ai/claude-agent-sdk` 0.3.258 to communicate
+Maestrly integrates `@anthropic-ai/claude-agent-sdk` 0.3.263 to communicate
 with a separately installed and authenticated Claude Code runtime. The package
 declares `SEE LICENSE IN README.md`; its distributed README links Anthropic's
 [Commercial Terms of Service](https://www.anthropic.com/legal/commercial-terms),

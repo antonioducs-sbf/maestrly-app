@@ -151,4 +151,4 @@ Electron tests launch the built application with isolated profiles and synthetic
 repositories. CI runs the complete check and Electron suite on Linux, macOS, and
 Windows. A separate scheduled workflow builds native packages and executes the
 packaged desktop and Local ML smokes. See [Development](development.md) and
-[Repository governance](repository-governance.md).
+[Contribution guidelines](../CONTRIBUTING.md).

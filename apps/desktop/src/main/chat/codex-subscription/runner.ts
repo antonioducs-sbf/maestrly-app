@@ -14,6 +14,7 @@ import type {
   SubagentRuntimeHandle,
 } from '../../../shared/chat'
 import type { ChatBehavior } from '../../../shared/conversation-experience'
+import { capabilityBehaviorFor } from '../../../shared/chat-mode'
 import type { MaestroTurnSnapshotV1 } from '../../../shared/maestro'
 import { applyChatEvent, MAESTRLY_ULTRA_EFFORT } from '../../../shared/chat'
 import { responseDurationMs } from '../../../shared/response-duration'
@@ -89,6 +90,7 @@ import {
   type MaestroWorkerToolRuntime,
 } from '../maestro-worker-tools'
 import { recordModelCallUsage } from '../usage-diagnostics'
+import { renderDesignModePrompt, renderDesignUltraGuidance } from '../design-mode-prompt'
 import {
   getProvider,
   isClaudeSubscriptionProvider,
@@ -96,10 +98,10 @@ import {
   isGitHubCopilotSubscriptionProvider,
   subscriptionAccountId,
 } from '../catalog'
-import { getClaudeSubscriptionManager } from '../claude-agent-sdk/manager'
 import { queueClaudeSessionCleanup } from '../claude-agent-sdk/session-store'
 import { runClaudeSubagent } from '../claude-agent-sdk/subagent-runner'
 import {
+  claudeSubagentRuntimeSignature,
   planSubagentResume,
   recreatedTask,
   resolveSubagentResume,
@@ -108,6 +110,7 @@ import {
   type SubagentResumeRecreateReason,
   type SubagentResumeSource,
 } from '../subagent-resume'
+import { FABLE_51_PROFILE_FLAG, resolveFableBehaviorProfile } from '../fable/profile'
 import { getGitHubCopilotSubscriptionManager } from '../github-copilot/manager'
 import { runGitHubCopilotSubagent } from '../github-copilot/subagent-runner'
 import { copilotTools } from '../github-copilot/tools'
@@ -126,7 +129,16 @@ import {
 } from '../image-gen'
 import type { CodexAppServerClient } from './client'
 import { generateImageForConversation } from './image-generation'
-import { getCodexSubscriptionManager } from './manager'
+import { getCodexSubscriptionManager, type CodexSubscriptionModel } from './manager'
+import {
+  astraDeveloperInstructions,
+  buildAstraCodexThreadProfile,
+  type AstraCodexThreadProfile,
+} from './astra-runtime-profile'
+import {
+  serializableReasoningEffortForProfile,
+  type ModelHarnessProfileId,
+} from '../model-harness-profile'
 import { nativeSubagentSuppressionConfig } from './model-catalog-override'
 import {
   dynamicToolRegistrations,
@@ -240,7 +252,7 @@ export interface CodexFailoverRuntimeTarget {
   providerId: string
   accountId: string | null
   client: CodexAppServerClient
-  model: { id: string; model: string; contextWindow?: number | null }
+  model: Pick<CodexSubscriptionModel, 'id' | 'model'> & Partial<CodexSubscriptionModel>
   runtimeModelId: string
   reasoningEffort?: string
   serviceTier: string | null
@@ -252,7 +264,10 @@ export interface CodexFailoverRuntimeTarget {
   /** Conservative effective window used by the host for this target's requested nominal configuration. */
   effectiveContextWindow?: number | null
   availabilityLease?: { leaseId: string; generation: number }
-  manager?: { observeModelContextWindow(modelId: string, value: number, requestedNominal?: number | null): void }
+  manager?: {
+    observeModelContextWindow(modelId: string, value: number, requestedNominal?: number | null): void
+    getStatusSnapshot?(): { account?: { type?: string } | null } | null
+  }
 }
 
 export interface CodexFailoverResolutionFailure {
@@ -290,6 +305,10 @@ export interface RunCodexSubscriptionChatArgs {
   /** Half-open probe lease for the initial attempt, if any. */
   availabilityLease?: { leaseId: string; generation: number }
   client: CodexAppServerClient
+  /** Exact model/list entry used for capability-gated Astra behavior. */
+  runtimeModel?: CodexSubscriptionModel | null
+  /** Experimental context is a ChatGPT-session capability, never an API-key/ephemeral assumption. */
+  eligibleChatGptSession?: boolean
   broker: PermissionBroker
   questionBroker: QuestionBroker
   emit: (event: ChatStreamEvent) => void
@@ -349,6 +368,16 @@ export interface RunCodexSubscriptionChatArgs {
     reason: string
     resetsAt?: number | null
   }) => void
+  /** Active-turn controls are valid only until the runner publishes null or replaces the port. */
+  onTurnControl?: (control: CodexActiveTurnControlPort | null) => void
+}
+
+export interface CodexActiveTurnControlPort {
+  harnessProfile: ModelHarnessProfileId
+  midTurnSteering: boolean
+  liveReasoningUpdate: boolean
+  steer(text: string, clientUserMessageId: string): Promise<'accepted' | 'target-unavailable'>
+  updateReasoning(effort: string): Promise<'applied' | 'target-unavailable' | 'invalid-effort'>
 }
 
 export interface RunCodexSubscriptionChatResult {
@@ -489,7 +518,7 @@ const DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG = {
   'shell_environment_policy.ignore_default_excludes': false,
 } as const
 /**
- * Codex 0.153.2 has no hard-off for auto-compaction. With `body_after_prefix`, it compares this limit directly
+ * Codex 0.153.4 has no hard-off for auto-compaction. With `body_after_prefix`, it compares this limit directly
  * (without model_info's default 90% clamp). MAX_SAFE_INTEGER crosses `thread/start` JSON without rounding and
  * delays native compaction, giving Maestrly the first chance to compact; the physical model window remains the
  * runtime's final limit. This applies ONLY to the persistent root thread. Ephemeral subagent/imagegen threads lack
@@ -509,6 +538,7 @@ const PORTABLE_CONTINUE_PROMPT =
   'Continue the same assistant turn from the imported transcript. Do not repeat completed work or prior progress updates.'
 export const SUBAGENT_CATALOG_DESCRIPTION_MAX_CHARS = 240
 export const TASK_TOOL_DESCRIPTION_MAX_BYTES = 512
+const ASTRA_EXPERIMENTAL_CONTEXT_UNAVAILABLE = new WeakSet<CodexAppServerClient>()
 const TASK_TOOL_DESCRIPTION =
   'Delegate one focused, self-contained task to an isolated Maestrly subagent. The subagent sees only the ' +
   'supplied prompt and returns its result. Include all required context and select the agent from the input enum.'
@@ -675,9 +705,9 @@ export function approvalConfig(
   sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
   approvalPolicy: 'untrusted' | 'on-request' | 'never'
 } {
-  // Read-only behavior modes must not escalate to writes regardless of the permission toggle. In Agent mode,
+  // Read-only behavior modes must not escalate to writes regardless of the permission toggle. With Agent capabilities,
   // the official sandbox is the first gate; escalation requests pass through the broker.
-  if (mode !== 'agent') {
+  if (capabilityBehaviorFor(mode) !== 'agent') {
     return { sandbox: 'read-only', approvalPolicy: permMode === 'full' ? 'never' : 'untrusted' }
   }
   if (permMode === 'full') return { sandbox: 'danger-full-access', approvalPolicy: 'never' }
@@ -746,6 +776,7 @@ export function maestrlyDeveloperInstructions(
   options: { conversationId?: string; maestro?: MaestroTurnSnapshotV1 } = {}
 ): string {
   const conversationId = options.conversationId ?? ''
+  const designPrompt = renderDesignModePrompt(mode)
   const common =
     'You are running inside Maestrly through the official Codex runtime. Keep your native Codex operating ' +
     'instructions and tool discipline. Maestrly renders GitHub-flavored Markdown and fenced `mermaid` diagrams. ' +
@@ -756,7 +787,8 @@ export function maestrlyDeveloperInstructions(
       ? `\n\n${renderMaestroAgentCatalog(options.maestro)}`
       : subagentCatalog(agents, conversationId, mode === 'plan' || mode === 'ask')) +
     (mode === 'maestro' && options.maestro ? `\n\n${renderMaestroTurnPolicy(options.maestro)}` : '') +
-    `\n\n${MEMORY_TOOL_GUIDANCE}`
+    `\n\n${MEMORY_TOOL_GUIDANCE}` +
+    (designPrompt ? `\n\n${designPrompt}` : '')
   if (mode === 'plan') {
     return (
       common +
@@ -775,8 +807,37 @@ export function maestrlyDeveloperInstructions(
   if (mode === 'maestro') {
     return common + `\n\n${MAESTRO_SYSTEM_SPEC}`
   }
+  if (mode === 'design') {
+    return common + ' This turn is Design mode with Agent-equivalent capabilities under the selected permissions.'
+  }
   return (
     common + ' This turn is Agent mode: carry the task through to a verified result within the selected permissions.'
+  )
+}
+
+function maestrlyAstraHostInstructions(
+  mode: ChatBehavior,
+  skills: readonly ChatSkill[],
+  agents: readonly ChatAgent[],
+  options: { conversationId: string; maestro?: MaestroTurnSnapshotV1 }
+): string {
+  const modeBoundary =
+    mode === 'plan'
+      ? 'Plan mode is read-only: investigate, submit the final plan with review_plan, and stop.'
+      : mode === 'ask'
+        ? 'Ask mode is read-only unless the user explicitly changes the task.'
+        : mode === 'design'
+          ? `Design mode has Agent-equivalent capabilities under the selected permissions.\n\n${renderDesignModePrompt(mode)}`
+        : mode === 'maestro'
+          ? MAESTRO_SYSTEM_SPEC
+          : 'Agent mode: carry authorized work through a verified result within the selected permissions.'
+  return (
+    modeBoundary +
+    maestrlySkillCatalog(skills) +
+    (mode === 'maestro' && options.maestro
+      ? `\n\n${renderMaestroAgentCatalog(options.maestro)}\n\n${renderMaestroTurnPolicy(options.maestro)}`
+      : subagentCatalog(agents, options.conversationId, mode === 'plan' || mode === 'ask')) +
+    `\n\n${MEMORY_TOOL_GUIDANCE}`
   )
 }
 
@@ -784,27 +845,32 @@ export function maestrlyDeveloperInstructions(
  * `collaborationMode` persists in the app-server thread. Explicitly send `default` in other modes so conversations
  * leaving Plan do not retain native planning instructions.
  */
-function collaborationModeFor(args: RunCodexSubscriptionChatArgs): CodexCollaborationMode {
+function collaborationModeFor(
+  args: RunCodexSubscriptionChatArgs,
+  reasoningEffort: string | undefined = args.reasoningEffort
+): CodexCollaborationMode {
   const ultraInstructions = args.maestrlyUltra
     ? args.mode === 'maestro'
       ? 'Maestrly Ultra applies only to the orchestrator reasoning profile. Keep all worker selection governed by the frozen Strategy and Agent Pool.'
-      : args.mode === 'agent'
-        ? 'Maestrly Ultra mode is active for this turn. Use maximum rigor. For every non-trivial task, actively ' +
-          'look for independent slices before starting. When useful independent slices exist, DELEGATE them through ' +
-          'the Maestrly `task` tool and emit multiple independent `task` calls in the same response so they run in ' +
-          'parallel. Use `explore` for broad investigation and worker agents for self-contained implementation ' +
-          'slices. Keep yourself as the orchestrator: integrate the results, verify the implementation, and ' +
-          'critically review the outcome before finishing. Delegation is encouraged, not mandatory when there is no ' +
-          'meaningful independent slice.'
-        : args.mode === 'plan'
-          ? 'Maestrly Ultra mode is active for this Plan turn. Stay read-only, investigate deeply, and actively look ' +
-            'for independent research lines. When useful, delegate them through the Maestrly `task` tool and emit ' +
-            'multiple independent `task` calls in the same response so they run in parallel. Synthesize and ' +
-            'cross-check the results into a concrete plan, submit it through review_plan, and stop.'
-          : 'Maestrly Ultra mode is active for this Ask turn. Stay read-only, investigate deeply, and actively look ' +
-            'for broad or independent investigation lines. When useful, delegate them through the Maestrly `task` ' +
-            'tool and emit multiple independent `task` calls in the same response so they run in parallel. ' +
-            'Cross-check the findings, verify assumptions, and answer with maximum rigor.'
+      : args.mode === 'design'
+        ? renderDesignUltraGuidance(args.mode)
+        : args.mode === 'agent'
+          ? 'Maestrly Ultra mode is active for this turn. Use maximum rigor. For every non-trivial task, actively ' +
+            'look for independent slices before starting. When useful independent slices exist, DELEGATE them through ' +
+            'the Maestrly `task` tool and emit multiple independent `task` calls in the same response so they run in ' +
+            'parallel. Use `explore` for broad investigation and worker agents for self-contained implementation ' +
+            'slices. Keep yourself as the orchestrator: integrate the results, verify the implementation, and ' +
+            'critically review the outcome before finishing. Delegation is encouraged, not mandatory when there is no ' +
+            'meaningful independent slice.'
+          : args.mode === 'plan'
+            ? 'Maestrly Ultra mode is active for this Plan turn. Stay read-only, investigate deeply, and actively look ' +
+              'for independent research lines. When useful, delegate them through the Maestrly `task` tool and emit ' +
+              'multiple independent `task` calls in the same response so they run in parallel. Synthesize and ' +
+              'cross-check the results into a concrete plan, submit it through review_plan, and stop.'
+            : 'Maestrly Ultra mode is active for this Ask turn. Stay read-only, investigate deeply, and actively look ' +
+              'for broad or independent investigation lines. When useful, delegate them through the Maestrly `task` ' +
+              'tool and emit multiple independent `task` calls in the same response so they run in parallel. ' +
+              'Cross-check the findings, verify assumptions, and answer with maximum rigor.'
     : args.mode === 'maestro'
       ? MAESTRO_SYSTEM_SPEC
       : null
@@ -812,7 +878,7 @@ function collaborationModeFor(args: RunCodexSubscriptionChatArgs): CodexCollabor
     mode: args.mode === 'plan' ? 'plan' : 'default',
     settings: {
       model: args.selection.modelId,
-      reasoning_effort: args.reasoningEffort && args.reasoningEffort !== 'off' ? args.reasoningEffort : null,
+      reasoning_effort: reasoningEffort && reasoningEffort !== 'off' ? reasoningEffort : null,
       // `null` restores the official preset after a Maestrly Ultra turn; the app-server field is sticky.
       developer_instructions: ultraInstructions,
     },
@@ -1341,11 +1407,18 @@ async function handleServerRequest(client: CodexAppServerClient, request: CodexS
     }
   }
 
-  if (request.method === 'item/tool/requestUserInput') {
+  if (request.method === 'item/tool/requestUserInput' || request.method === 'item/tool/requestUserInputAsync') {
+    const asyncQuestion = request.method === 'item/tool/requestUserInputAsync'
     const pendingRequest = beginPendingServerRequest(route, threadId, request.id, {
       preserveOnAccountFailover: threadId !== route.rootThreadId,
     })
-    const rawQuestions = Array.isArray(params.questions) ? params.questions : []
+    const rawQuestions = asyncQuestion
+      ? typeof params.question === 'string'
+        ? [{ id: 'async', header: 'Question', question: params.question, options: [] }]
+        : []
+      : Array.isArray(params.questions)
+        ? params.questions
+        : []
     const questions: ChatQuestion[] = rawQuestions.map((raw, index) => {
       const question = isRecord(raw) ? raw : {}
       const options = Array.isArray(question.options)
@@ -1402,7 +1475,9 @@ async function handleServerRequest(client: CodexAppServerClient, request: CodexS
         toolCallId: visibleItemId,
         state: { status: 'completed', output: clipPersistedToolOutput(persistedOutput) },
       })
-      return { answers: byId }
+      return asyncQuestion
+        ? { answers: byId, answer: answers[0]?.join('\n') ?? '' }
+        : { answers: byId }
     } finally {
       pendingRequest.finish()
     }
@@ -1639,18 +1714,19 @@ async function buildDynamicTools(
   agents: ChatAgent[]
   close: () => Promise<void>
 }> {
+  const capabilityMode = capabilityBehaviorFor(args.mode)
   const physicalAgents = args.reviewerRuntime
     ? []
     : await listEffectiveAgents({
         cwd: args.cwd,
         conversationId: args.conversationId,
-        mode: args.mode === 'agent' || args.mode === 'maestro' ? 'agent' : 'plan',
+        mode: capabilityMode === 'agent' || args.mode === 'maestro' ? 'agent' : 'plan',
       })
   const agents = args.reviewerRuntime
     ? []
     : args.mode === 'maestro' && args.maestro
       ? maestroAgentsFromTurn(args.maestro, physicalAgents)
-      : args.mode === 'agent'
+      : capabilityMode === 'agent'
         ? physicalAgents
         : args.maestrlyUltra
           ? physicalAgents.filter((agent) => agent.name === 'explore')
@@ -1672,7 +1748,7 @@ async function buildDynamicTools(
   const appToolsEnabled = !args.reviewerRuntime && (prefs?.app ?? getAppFlag('chat.appTools', false))
   const disabledIds = new Set(prefs?.mcpDisabled ?? [])
   const mcp =
-    !args.reviewerRuntime && (args.mode === 'agent' || args.mode === 'maestro')
+    !args.reviewerRuntime && (capabilityMode === 'agent' || args.mode === 'maestro')
       ? await buildMcpTools({
           signal: args.signal,
           mode: args.mode,
@@ -1690,7 +1766,7 @@ async function buildDynamicTools(
         })
       : { tools: {}, close: async () => {} }
   const app =
-    !args.reviewerRuntime && (args.mode === 'agent' || args.mode === 'maestro') && appToolsEnabled
+    !args.reviewerRuntime && (capabilityMode === 'agent' || args.mode === 'maestro') && appToolsEnabled
       ? await buildAppTools({
           conversationId: args.conversationId,
           mode: args.mode,
@@ -1720,7 +1796,7 @@ async function buildDynamicTools(
     // Ask may inspect real code without gaining mutation tools.
     const bridgeNames = args.reviewerRuntime
       ? new Set(REVIEWER_READONLY_TOOL_NAMES)
-      : args.mode === 'agent' && args.permMode !== 'full'
+      : capabilityMode === 'agent' && args.permMode !== 'full'
         ? new Set(['bash'])
         : args.mode === 'plan' || args.mode === 'ask' || args.mode === 'maestro'
           ? new Set(['read', 'grep', 'glob', 'webfetch'])
@@ -1869,11 +1945,7 @@ async function buildDynamicTools(
     }
     // ALL Maestrly skills (`.agents` + `.claude`) enter the same host-owned ToolSet above. Codex's
     // NATIVE catalog is disabled in all modes (`skills.include_instructions: false`).
-    if (
-      !args.reviewerRuntime &&
-      args.mode !== 'ask' &&
-      args.mode !== 'maestro'
-    ) {
+    if (!args.reviewerRuntime && args.mode !== 'ask' && args.mode !== 'maestro') {
       const schema = asSchema(reviewPlanTool.parameters)
       runtimes.push({
         spec: {
@@ -1923,6 +1995,7 @@ function bindingCanResume(
   previousMessageId: string | null,
   signature: string,
   instructionHash: string,
+  harnessProfile: ModelHarnessProfileId,
   accountId: string | null
 ): binding is CodexThreadBinding {
   // Model is not part of identity: `thread/resume` accepts the official `model` override. Sol/Luna changes
@@ -1933,8 +2006,15 @@ function bindingCanResume(
     binding.lastMessageId === previousMessageId &&
     binding.toolSignature === signature &&
     binding.instructionHash === instructionHash &&
+    binding.harnessProfile === harnessProfile &&
     // Multiple accounts: a thread lives in its owner's CODEX_HOME; another account must never resume it.
     binding.accountId === accountId
+  )
+}
+
+function experimentalContextUnavailable(error: unknown): boolean {
+  return /(?:experimental[_ ]context|context[_ ]management).*(?:unsupported|unavailable|not enabled|not eligible)|(?:unsupported|unknown).*(?:experimental[_ ]mode)/i.test(
+    errorMessage(error)
   )
 }
 
@@ -2035,6 +2115,7 @@ export async function compactCodexSubscriptionThread(
 export async function runCodexSubscriptionChat(
   args: RunCodexSubscriptionChatArgs
 ): Promise<RunCodexSubscriptionChatResult> {
+  const capabilityMode = capabilityBehaviorFor(args.mode)
   const settleInitialLeaseAsOther = (): void => {
     if (!args.availabilityLease) return
     getSubscriptionFailoverRouter().confirmAttemptOther(
@@ -2071,6 +2152,46 @@ export async function runCodexSubscriptionChat(
   let currentModelId = args.selection.modelId
   let currentLease = args.availabilityLease
   let currentRequestedContextWindow = positiveContextWindow(args.requestedContextWindow) || null
+  let experimentalContextFallbackDisabled = false
+  const astraHarnessEnabledAtAdmission = getAppFlag('chat.astraHarness', true)
+  const profileFor = (
+    model: Partial<CodexSubscriptionModel> | null | undefined,
+    client: CodexAppServerClient,
+    eligibleChatGptSession = args.eligibleChatGptSession === true
+  ): AstraCodexThreadProfile => {
+    const session = client.initializeResult?.capabilities
+    return buildAstraCodexThreadProfile({
+      modelId: currentModelId,
+      model,
+      astraHarnessEnabled: astraHarnessEnabledAtAdmission,
+      eligibleChatGptSession,
+      ephemeral: Boolean(args.ephemeralSession),
+      reviewer: Boolean(args.reviewerRuntime),
+      requestUserInputAsyncAvailable: session?.requestUserInputAsync === true,
+      turnSteerAvailable: session?.turnSteer,
+      turnSettingsUpdateAvailable: session?.turnSettingsUpdate,
+      reasoningEffort: currentReasoningEffort,
+      experimentalContextFallbackDisabled:
+        experimentalContextFallbackDisabled || ASTRA_EXPERIMENTAL_CONTEXT_UNAVAILABLE.has(client),
+    })
+  }
+  let runtimeProfile = profileFor(args.runtimeModel, currentClient)
+  currentReasoningEffort = runtimeProfile.reasoningEffort ?? undefined
+  chatDiag({
+    kind: 'codex-subscription-harness-profile',
+    profile: runtimeProfile.modelHarnessProfileId,
+    model: currentModelId,
+    conv: args.conversationId,
+    nativeCompaction: runtimeProfile.nativeCompactionFirst,
+    experimentalContext: runtimeProfile.experimentalContextEnabled,
+    steering: runtimeProfile.capabilities.steering,
+    liveReasoning: runtimeProfile.capabilities.configurationUpdates,
+    asyncQuestions: runtimeProfile.asyncQuestionGuidance,
+    nativeMultiAgent: 'disabled-host-task',
+    modelCapabilities: runtimeProfile.modelCapabilities,
+    adapterCapabilities: runtimeProfile.adapterCapabilities,
+    effectiveCapabilities: runtimeProfile.capabilities,
+  })
   let currentObserveContextWindow: ((contextWindow: number) => void) | undefined
   const updateContextWindowObserver = (
     manager?: CodexFailoverRuntimeTarget['manager'],
@@ -2102,7 +2223,12 @@ export async function runCodexSubscriptionChat(
   const attemptedProviderIds = new Set<string>([currentProviderId])
   const chain = args.failoverChain?.length ? [...args.failoverChain] : [args.selection.providerId]
   const failoverEnabled = typeof args.resolveNextTarget === 'function' && chain.length > 1
+  let currentAttemptSettled = false
   const settleCurrentAttempt = (result: 'success' | 'quota' | 'other', exhaustionInfo?: MarkExhaustedInfo): void => {
+    // Completion can publish quota before child recovery, then reach failover later.
+    // Settle once so an old failure cannot overwrite a newer probe from another turn.
+    if (currentAttemptSettled) return
+    currentAttemptSettled = true
     const lease = currentLease
     currentLease = undefined
     const providerId = currentProviderId
@@ -2135,6 +2261,9 @@ export async function runCodexSubscriptionChat(
       createdAt,
     },
   ]
+  // Steering user messages are persisted after the in-progress assistant row. The binding follows the latest
+  // accepted portable anchor so the next turn can still resume the same native thread.
+  let lastBindingMessageId: string = assistantId
   let dirty = false
   let lastPersistAt = 0
   const persistNow = (): void => {
@@ -2319,7 +2448,34 @@ export async function runCodexSubscriptionChat(
   const toolProfile = profileDynamicTools(specs)
   const signature = dynamicToolSignature(specs)
   const projectContext = await buildProjectContext(args.projectId, args.cwd)
-  const instructionHash = createHash('sha256').update(projectContext).digest('hex')
+  const developerInstructionsFor = (profile: AstraCodexThreadProfile): string => {
+    const base = profile.isAstra
+      ? maestrlyAstraHostInstructions(args.mode, dynamic.skills, dynamic.agents, {
+          conversationId: args.conversationId,
+          maestro: args.maestro,
+        })
+      : maestrlyDeveloperInstructions(args.mode, dynamic.skills, dynamic.agents, {
+          conversationId: args.conversationId,
+          maestro: args.maestro,
+        })
+    return (profile.isAstra ? astraDeveloperInstructions(base, profile) : base) + projectContext
+  }
+  let developerInstructions = developerInstructionsFor(runtimeProfile)
+  const structuralInstructionHash = (): string =>
+    createHash('sha256')
+      .update(
+        JSON.stringify({
+          version: 2,
+          harnessProfile: runtimeProfile.modelHarnessProfileId,
+          promptVersion: runtimeProfile.promptVersion,
+          developerInstructions,
+          projectContext,
+          nativeCompactionFirst: runtimeProfile.nativeCompactionFirst,
+          experimentalContext: runtimeProfile.experimentalContextEnabled,
+        })
+      )
+      .digest('hex')
+  let instructionHash = structuralInstructionHash()
   // Account slot: bindings/tombstones record the thread owner so hard-delete always uses the correct
   // CODEX_HOME, even after restart. `threadAccountId` is mutable under failover.
   const runtimeByName = new Map(dynamic.runtimes.map((runtime) => [runtime.spec.name, runtime]))
@@ -2329,9 +2485,24 @@ export async function runCodexSubscriptionChat(
   const previousMessage = history.at(-2) ?? null
   const canResume =
     !args.ephemeralSession &&
-    bindingCanResume(existing, previousMessage?.id ?? null, signature, instructionHash, threadAccountId)
+    bindingCanResume(
+      existing,
+      previousMessage?.id ?? null,
+      signature,
+      instructionHash,
+      runtimeProfile.modelHarnessProfileId,
+      threadAccountId
+    )
   // Isolated: neither resume NOR retire the main conversation binding.
   if (existingThreadId && !canResume && !args.ephemeralSession) {
+    chatDiag({
+      kind: 'codex-subscription-thread-boundary',
+      conv: args.conversationId,
+      model: currentModelId,
+      fromProfile: existing?.harnessProfile,
+      toProfile: runtimeProfile.modelHarnessProfileId,
+      reason: existing?.harnessProfile !== runtimeProfile.modelHarnessProfileId ? 'harness-profile' : 'compatibility',
+    })
     await retireCodexThread(args.conversationId, existingThreadId, existingAccountId)
   }
   let baseline = canResume ? existing.usage : { ...EMPTY_USAGE }
@@ -2348,7 +2519,12 @@ export async function runCodexSubscriptionChat(
     // Default modes used by Agent/Ask without duplicating it as a dynamic tool.
     config: {
       ...DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG,
-      ...ROOT_THREAD_NATIVE_AUTO_COMPACTION_CONFIG,
+      ...(runtimeProfile.nativeCompactionFirst ? {} : ROOT_THREAD_NATIVE_AUTO_COMPACTION_CONFIG),
+      ...(runtimeProfile.experimentalContextEnabled
+        ? { 'features.context_management.experimental_mode': true }
+        : runtimeProfile.isAstra
+          ? { 'features.context_management.experimental_mode': false }
+          : {}),
       // Maestrly discovers and budgets project docs for all runtimes. Zero prevents Codex from injecting
       // AGENTS.md twice with a root/budget that may differ from the canonical contract.
       project_doc_max_bytes: 0,
@@ -2362,7 +2538,7 @@ export async function runCodexSubscriptionChat(
       ...nativeSubagentSuppressionConfig(),
       // Plan receives Maestrly readers; controlled Ask/Agent receive no native shell. This avoids
       // the internal `UnlessTrusted` safelist, which would execute `cat`/`rg` without consulting Maestrly's broker.
-      ...(args.reviewerRuntime || args.mode !== 'agent' || args.permMode !== 'full'
+      ...(args.reviewerRuntime || capabilityMode !== 'agent' || args.permMode !== 'full'
         ? { 'features.shell_tool': false }
         : {}),
       // Native web search never requests approval. Disable it in Ask to avoid bypassing the webfetch gate;
@@ -2388,15 +2564,29 @@ export async function runCodexSubscriptionChat(
       // providers. The explicit flag also protects Plan/Ask against runtime defaults.
       'features.image_generation': false,
     } as Record<string, unknown>,
-    developerInstructions:
-      maestrlyDeveloperInstructions(args.mode, dynamic.skills, dynamic.agents, {
-        conversationId: args.conversationId,
-        maestro: args.maestro,
-      }) + projectContext,
-    personality: 'pragmatic' as const,
+    developerInstructions,
+    ...(runtimeProfile.personality ? { personality: runtimeProfile.personality } : {}),
   }
   const baseThreadConfig: Record<string, unknown> = { ...threadOptions.config }
   delete baseThreadConfig.model_context_window
+  const disableExperimentalContext = (): void => {
+    if (!runtimeProfile.experimentalContextEnabled) return
+    experimentalContextFallbackDisabled = true
+    ASTRA_EXPERIMENTAL_CONTEXT_UNAVAILABLE.add(currentClient)
+    runtimeProfile = profileFor(args.runtimeModel, currentClient)
+    baseThreadConfig['features.context_management.experimental_mode'] = false
+    threadOptions.config = {
+      ...baseThreadConfig,
+      ...(currentRequestedContextWindow != null ? { model_context_window: currentRequestedContextWindow } : {}),
+    }
+    instructionHash = structuralInstructionHash()
+    chatDiag({
+      kind: 'codex-subscription-experimental-context-fallback',
+      profile: runtimeProfile.modelHarnessProfileId,
+      model: currentModelId,
+      conv: args.conversationId,
+    })
+  }
   const setRequestedContextWindow = (value: unknown): void => {
     currentRequestedContextWindow = positiveContextWindow(value) || null
     threadOptions.config = {
@@ -2405,6 +2595,7 @@ export async function runCodexSubscriptionChat(
     }
   }
   const applyTarget = (next: CodexFailoverRuntimeTarget): void => {
+    args.onTurnControl?.(null)
     currentClient = next.client
     threadAccountId = next.accountId
     currentProviderId = next.providerId
@@ -2412,9 +2603,32 @@ export async function runCodexSubscriptionChat(
     currentDropImages = next.dropImages
     currentReasoningEffort = next.reasoningEffort
     currentModelId = next.runtimeModelId
+    runtimeProfile = profileFor(
+      next.model,
+      next.client,
+      next.manager?.getStatusSnapshot?.()?.account?.type === 'chatgpt'
+    )
+    currentReasoningEffort = runtimeProfile.reasoningEffort ?? undefined
     currentLease = next.availabilityLease
+    currentAttemptSettled = false
     threadOptions.model = currentModelId
     threadOptions.serviceTier = currentServiceTier
+    developerInstructions = developerInstructionsFor(runtimeProfile)
+    threadOptions.developerInstructions = developerInstructions
+    if (runtimeProfile.personality) threadOptions.personality = runtimeProfile.personality
+    else delete (threadOptions as { personality?: string }).personality
+    if (runtimeProfile.isAstra) {
+      baseThreadConfig['features.context_management.experimental_mode'] = runtimeProfile.experimentalContextEnabled
+    } else {
+      delete baseThreadConfig['features.context_management.experimental_mode']
+    }
+    if (runtimeProfile.nativeCompactionFirst) {
+      delete baseThreadConfig.model_auto_compact_token_limit
+      delete baseThreadConfig.model_auto_compact_token_limit_scope
+    } else {
+      Object.assign(baseThreadConfig, ROOT_THREAD_NATIVE_AUTO_COMPACTION_CONFIG)
+    }
+    instructionHash = structuralInstructionHash()
     setRequestedContextWindow(next.requestedContextWindow)
     updateContextWindowObserver(next.manager, currentModelId)
     observePortableContextWindow(targetEffectiveContextWindow(next))
@@ -2492,6 +2706,8 @@ export async function runCodexSubscriptionChat(
   }
   const onStartupAbort = (): void => armRootAbortTimeout()
   args.signal.addEventListener('abort', onStartupAbort, { once: true })
+  const managedTaskRecoveryStop = new AbortController()
+  const managedTaskRecoverySignal = AbortSignal.any([args.signal, managedTaskRecoveryStop.signal])
   try {
     if (canResume) {
       try {
@@ -2517,6 +2733,9 @@ export async function runCodexSubscriptionChat(
         if (threadId !== existing.threadId) routeRegistration.removeThread(existing.threadId)
       } catch (error) {
         if (args.signal.aborted) throw error
+        if (runtimeProfile.experimentalContextEnabled && experimentalContextUnavailable(error)) {
+          disableExperimentalContext()
+        }
         routeRegistration.removeThread(existing.threadId)
         await retireCodexThread(args.conversationId, existing.threadId, existing.accountId)
         // The replacement thread starts cumulative counts at zero. Reusing the lost thread's baseline
@@ -2577,7 +2796,7 @@ export async function runCodexSubscriptionChat(
           ...threadOptions,
           // Empty is the official contract to disable environment access: removes shell/apply_patch/view_image.
           // Plan and Ask continue investigating only through the gated dynamic readers above.
-          ...(args.mode === 'agent' && !args.reviewerRuntime ? {} : { environments: [] }),
+          ...(capabilityMode === 'agent' && !args.reviewerRuntime ? {} : { environments: [] }),
           ephemeral: Boolean(args.ephemeralSession),
           dynamicTools: registrations,
         } as Parameters<CodexAppServerClient['startThread']>[0] & {
@@ -2599,6 +2818,10 @@ export async function runCodexSubscriptionChat(
           .catch(() => {})
         deadline.cancel()
         if (args.signal.aborted) throw error
+        if (runtimeProfile.experimentalContextEnabled && experimentalContextUnavailable(error)) {
+          disableExperimentalContext()
+          continue
+        }
 
         const startClassification = await classifyCodexQuotaFailureWithRateLimits(error, () =>
           getCodexSubscriptionManager(threadAccountId).getRateLimits(true)
@@ -2688,6 +2911,7 @@ export async function runCodexSubscriptionChat(
     let rootAttemptActive = false
     let portableCompactionRequested = false
     let portableInterruptPromise: Promise<void> | null = null
+    let nativeCompactionActive = false
     let inTurnCompactions = 0
     const carriedMainUsage = { totalInput: 0, cachedInput: 0, cacheCreate: 0, output: 0 }
     const carryCurrentAttemptUsage = (notification: TokenUsageNotification | null): void => {
@@ -2800,6 +3024,7 @@ export async function runCodexSubscriptionChat(
       // handleServerRequest returns and the client writes the tool response to app-server stdio.
       setImmediate(() => {
         planStopArmed = true
+        managedTaskRecoveryStop.abort()
         if (threadId && turnId) void currentClient.interruptTurn({ threadId, turnId }).catch(() => {})
       })
     }
@@ -2842,6 +3067,21 @@ export async function runCodexSubscriptionChat(
       if (activeManagedTasks) return
       for (const wake of managedTaskWaiters) wake()
       managedTaskWaiters.clear()
+    }
+    const waitForManagedTaskRecovery = (): Promise<void> => {
+      if (!activeManagedTasks || managedTaskRecoverySignal.aborted) return Promise.resolve()
+      // A quota failure ends the provider turn, not the host task. Children may still be
+      // finishing tools or continuing on another account. Their runtime/abort owns that
+      // lifetime; the shutdown deadline starts only once recovery finishes or is stopped.
+      return new Promise<void>((resolve) => {
+        const wake = (): void => {
+          managedTaskWaiters.delete(wake)
+          managedTaskRecoverySignal.removeEventListener('abort', wake)
+          resolve()
+        }
+        managedTaskWaiters.add(wake)
+        managedTaskRecoverySignal.addEventListener('abort', wake, { once: true })
+      })
     }
     const waitForManagedTasks = (deadline: number): Promise<void> => {
       if (!activeManagedTasks) return Promise.resolve()
@@ -3122,7 +3362,8 @@ export async function runCodexSubscriptionChat(
             const resumeFor = (
               providerId: string,
               accountId: string | null,
-              toolSignature?: string
+              toolSignature?: string,
+              claudeContract?: { modelId: string; behaviorProfileId: string | null; runtimeSignature: string }
             ): {
               task: string
               handle: SubagentRuntimeHandle | null
@@ -3131,7 +3372,13 @@ export async function runCodexSubscriptionChat(
             } => {
               if (!resumeSource) return { task, handle: null, fallbackTask: task }
               const fallback = (reason: SubagentResumeRecreateReason) => recreatedTask(task, resumeSource, reason)
-              const plan = planSubagentResume({ providerId, accountId, toolSignature, resume: resumeSource })
+              const plan = planSubagentResume({
+                providerId,
+                accountId,
+                toolSignature,
+                ...claudeContract,
+                resume: resumeSource,
+              })
               if (plan.mode === 'recreate') {
                 recordResume('recreated', plan.reason)
                 return { task: fallback(plan.reason), handle: null, fallbackTask: fallback(plan.reason) }
@@ -3195,6 +3442,7 @@ export async function runCodexSubscriptionChat(
                             ? profile.effective!.sentEffort
                             : undefined,
                       fastMode: effectiveProfile.fastMode === true,
+                      astraHarnessEnabled: astraHarnessEnabledAtAdmission,
                       chain,
                       attemptedProviderIds: attempted,
                       signal,
@@ -3432,101 +3680,132 @@ export async function runCodexSubscriptionChat(
                 })()
               : nativeClaude
                 ? await (async () => {
-                    const manager = getClaudeSubscriptionManager(subscriptionAccountId(profile.effective!.providerId))
-                    const status = await manager.status({ refresh: true })
-                    if (!status.authenticated || !status.accountFingerprint) {
-                      return { text: '', error: 'Claude subscription is not authenticated.' }
-                    }
-                    const accountId = manager.accountId ?? null
-                    const resume = resumeFor(profile.effective!.providerId, accountId)
+                    let runtimeSignature = ''
+                    let behaviorProfile: ReturnType<typeof resolveFableBehaviorProfile>['profile'] | undefined
                     const outcome = await runClaudeSubagent({
-                      manager,
-                      accountIdentity: {
-                        fingerprint: status.accountFingerprint,
-                        epoch: status.accountEpoch,
-                      },
                       conversationId: args.conversationId,
                       cwd: args.cwd,
                       profile,
+                      prepareTarget: (target) => {
+                        if (behaviorProfile === undefined)
+                          behaviorProfile = resolveFableBehaviorProfile({
+                            requestedModelId: profile.effective!.modelId,
+                            resolvedModelId: target.runtimeModelId,
+                            enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
+                          }).profile
+                        runtimeSignature = claudeSubagentRuntimeSignature({
+                          modelId: target.runtimeModelId,
+                          accountIdentity: target.accountIdentity,
+                          behaviorProfileId: behaviorProfile?.id ?? null,
+                          prompt: effectiveDefinition.prompt,
+                          readOnly: codexReadOnly,
+                          sentEffort: profile.effective!.sentEffort,
+                          fastMode: profile.effective!.fastMode === true,
+                          toolNames: [...childToolNames],
+                        })
+                        const resume = resumeFor(target.providerId, target.accountId, undefined, {
+                          modelId: target.runtimeModelId,
+                          behaviorProfileId: behaviorProfile?.id ?? null,
+                          runtimeSignature,
+                        })
+                        return {
+                          task: resume.task,
+                          behaviorProfile,
+                          ...(resume.handle?.kind === 'claude-session'
+                            ? {
+                                resume: {
+                                  sessionId: resume.handle.sessionId,
+                                  fallbackTask: resume.fallbackTask,
+                                  accountId: resume.handle.accountId,
+                                },
+                              }
+                            : {}),
+                        }
+                      },
                       definition: effectiveDefinition,
                       signal,
                       agentName,
-                      task: resume.task,
+                      task,
                       readOnly: codexReadOnly,
                       tools: claudeSubagentTools,
                       allowSkillLoader: args.mode === 'maestro',
                       progress,
                       onTextUpdate,
                       persistRuntime,
-                      ...(resume.handle?.kind === 'claude-session'
-                        ? { resume: { sessionId: resume.handle.sessionId, fallbackTask: resume.fallbackTask } }
-                        : {}),
-                      onSessionStarted: ({ sessionId }) => {
+                      onSessionStarted: ({ sessionId, target }) => {
                         if (!persistRuntime) return
-                        sessionRecorder.runtimeHandle({ kind: 'claude-session', sessionId, cwd: args.cwd, accountId })
-                        queueClaudeSessionCleanup(args.conversationId, sessionId, args.cwd, accountId)
+                        sessionRecorder.runtimeHandle({
+                          kind: 'claude-session',
+                          sessionId,
+                          cwd: args.cwd,
+                          accountId: target.accountId,
+                          modelId: target.runtimeModelId,
+                          behaviorProfileId: behaviorProfile?.id ?? null,
+                          runtimeSignature,
+                        })
+                        queueClaudeSessionCleanup(args.conversationId, sessionId, args.cwd, target.accountId)
                       },
                     })
                     settleResume(outcome)
                     return outcome
                   })()
                 : nativeCopilot
-                    ? await (async () => {
-                        const manager = getGitHubCopilotSubscriptionManager(
-                          subscriptionAccountId(profile.effective!.providerId)
-                        )
-                        const identity = manager.getAccountIdentity()
-                        if (!identity.fingerprint) {
-                          return { text: '', error: 'GitHub Copilot subscription is not authenticated.' }
-                        }
-                        return runGitHubCopilotSubagent({
-                          manager,
-                          accountIdentity: identity,
-                          conversationId: args.conversationId,
-                          cwd: args.cwd,
-                          profile,
-                          definition: effectiveDefinition,
-                          signal,
-                          agentName,
-                          task: resumeFor(profile.effective!.providerId, null).task,
-                          readOnly: codexReadOnly,
-                          tools: await copilotTools(
-                            Object.fromEntries(
-                              Object.entries(namespacedChildTools).filter(([name]) => childToolNames.has(name))
-                            ),
-                            signal,
-                            childDeferredToolNames
+                  ? await (async () => {
+                      const manager = getGitHubCopilotSubscriptionManager(
+                        subscriptionAccountId(profile.effective!.providerId)
+                      )
+                      const identity = manager.getAccountIdentity()
+                      if (!identity.fingerprint) {
+                        return { text: '', error: 'GitHub Copilot subscription is not authenticated.' }
+                      }
+                      return runGitHubCopilotSubagent({
+                        manager,
+                        accountIdentity: identity,
+                        conversationId: args.conversationId,
+                        cwd: args.cwd,
+                        profile,
+                        definition: effectiveDefinition,
+                        signal,
+                        agentName,
+                        task: resumeFor(profile.effective!.providerId, null).task,
+                        readOnly: codexReadOnly,
+                        tools: await copilotTools(
+                          Object.fromEntries(
+                            Object.entries(namespacedChildTools).filter(([name]) => childToolNames.has(name))
                           ),
-                          allowSkillLoader: args.mode === 'maestro',
-                          progress,
-                          onTextUpdate,
-                        })
-                      })()
-                    : await (async () => {
-                        // BYOK: without a server-side session, resume replays the previous turn as history.
-                        const resume = resumeFor(profile.effective!.providerId, null)
-                        const outcome = await runSubagent({
-                          cwd: args.cwd,
-                          projectId: args.projectId,
-                          conversationId: args.conversationId,
-                          parentMessageId: assistantId,
-                          toolCallId,
-                          profile,
-                          definition: effectiveDefinition,
-                          broker: args.broker,
                           signal,
-                          agentName,
-                          task: resume.task,
-                          ...(resume.replay ? { replayHistory: resume.replay } : {}),
-                          progress,
-                          onTextUpdate,
-                          readOnly: codexReadOnly,
-                          tools: childTools,
-                          allowSkillLoader: args.mode === 'maestro',
-                        })
-                        if (resume.replay) settleResume({ resumed: true })
-                        return outcome
-                      })()
+                          childDeferredToolNames
+                        ),
+                        allowSkillLoader: args.mode === 'maestro',
+                        progress,
+                        onTextUpdate,
+                      })
+                    })()
+                  : await (async () => {
+                      // BYOK: without a server-side session, resume replays the previous turn as history.
+                      const resume = resumeFor(profile.effective!.providerId, null)
+                      const outcome = await runSubagent({
+                        cwd: args.cwd,
+                        projectId: args.projectId,
+                        conversationId: args.conversationId,
+                        parentMessageId: assistantId,
+                        toolCallId,
+                        profile,
+                        definition: effectiveDefinition,
+                        broker: args.broker,
+                        signal,
+                        agentName,
+                        task: resume.task,
+                        ...(resume.replay ? { replayHistory: resume.replay } : {}),
+                        progress,
+                        onTextUpdate,
+                        readOnly: codexReadOnly,
+                        tools: childTools,
+                        allowSkillLoader: args.mode === 'maestro',
+                      })
+                      if (resume.replay) settleResume({ resumed: true })
+                      return outcome
+                    })()
             const runtimeEstimatedCostUsd = (result as { runtimeEstimatedCostUsd?: number }).runtimeEstimatedCostUsd
             if (
               result.model &&
@@ -3819,10 +4098,11 @@ export async function runCodexSubscriptionChat(
       })
     }
 
-    const stopUnfinishedChildren = async (): Promise<void> => {
+    const stopUnfinishedChildren = async (preserveManagedTasks = false): Promise<void> => {
       // `handleNotification` delivers each line synchronously in order. When parent completion arrives here,
       // receiverThreadIds from earlier spawns are already registered. Do not use timers to start teardown:
       // besides delaying finish, this breaks hosts/tests with virtual clocks.
+      if (preserveManagedTasks) await waitForManagedTaskRecovery()
       const deadline = Date.now() + CHILD_STOP_TIMEOUT_MS
       await waitForManagedTasks(deadline)
       for (let round = 0; round < 8; round += 1) {
@@ -3902,6 +4182,19 @@ export async function runCodexSubscriptionChat(
     const settleRootAfterChildren = (params: TurnCompletedParams): void => {
       if (rootCompletionCleanupStarted) return
       rootCompletionCleanupStarted = true
+      const classification = rootCompletedClassification
+      if (classification?.kind === 'quota') {
+        // Publish exhaustion before waiting so queued children also select another account.
+        settleCurrentAttempt('quota', {
+          reason: classification.message,
+          source: exhaustionSource(classification),
+          resetsAt: classification.resetsAt ?? null,
+        })
+      }
+      const preserveManagedTasks =
+        (classification?.kind === 'quota' || classification?.kind === 'suspect') &&
+        !args.signal.aborted &&
+        !planStopArmed
       // A normal Codex task is synchronous from the provider's point of view, so root completion drains every
       // child before settling. Maestro `delegate` is intentionally detached: draining here would either cancel
       // useful work or wait 15 seconds and fail before the supervision continuation can run.
@@ -3909,7 +4202,7 @@ export async function runCodexSubscriptionChat(
         args.mode === 'maestro' && maestroGuardRequired && !args.signal.aborted && !planStopArmed
       const cleanup = preserveAsyncMaestroDelegations
         ? waitForGeneratedImages()
-        : stopUnfinishedChildren().then(() => waitForGeneratedImages())
+        : stopUnfinishedChildren(preserveManagedTasks).then(() => waitForGeneratedImages())
       void cleanup
         .then(() => settle(params))
         .catch(async (error) => {
@@ -3941,6 +4234,7 @@ export async function runCodexSubscriptionChat(
       const eventThreadId = typeof params.threadId === 'string' ? params.threadId : ''
       if (!activeThreadIds.has(eventThreadId)) return
       const rootEvent = eventThreadId === threadId
+      if (rootEvent && nativeCompactionActive && method !== 'thread/deleted') return
       const eventTurnId = typeof params.turnId === 'string' ? params.turnId : ''
       if (rootEvent && turnId && eventTurnId && eventTurnId !== turnId) return
 
@@ -3980,6 +4274,76 @@ export async function runCodexSubscriptionChat(
           if (startedTurnId) {
             turnId = startedTurnId
             rootTurnAccepted = true
+            const controlledClient = currentClient
+            const controlledThreadId = threadId
+            const controlledTurnId = startedTurnId
+            const controlledProfile = runtimeProfile
+            args.onTurnControl?.({
+              harnessProfile: controlledProfile.modelHarnessProfileId,
+              midTurnSteering: controlledProfile.capabilities.steering,
+              liveReasoningUpdate: controlledProfile.capabilities.configurationUpdates,
+              steer: async (text, clientUserMessageId) => {
+                if (
+                  !controlledProfile.capabilities.steering ||
+                  !rootAttemptActive ||
+                  turnId !== controlledTurnId ||
+                  threadId !== controlledThreadId ||
+                  currentClient !== controlledClient
+                )
+                  return 'target-unavailable'
+                await controlledClient.steerTurn(
+                  {
+                    threadId: controlledThreadId,
+                    expectedTurnId: controlledTurnId,
+                    input: [codexTextInput(text)],
+                    clientUserMessageId,
+                  },
+                  { signal: args.signal, timeoutMs: 30_000 }
+                )
+                lastBindingMessageId = clientUserMessageId
+                chatDiag({
+                  kind: 'codex-subscription-steering',
+                  profile: controlledProfile.modelHarnessProfileId,
+                  model: currentModelId,
+                  conv: args.conversationId,
+                  result: 'accepted',
+                })
+                return 'accepted'
+              },
+              updateReasoning: async (effort) => {
+                if (
+                  !controlledProfile.capabilities.configurationUpdates ||
+                  !rootAttemptActive ||
+                  turnId !== controlledTurnId ||
+                  threadId !== controlledThreadId ||
+                  currentClient !== controlledClient
+                )
+                  return 'target-unavailable'
+                const sent = serializableReasoningEffortForProfile(controlledProfile.modelHarnessProfileId, effort)
+                if (effort !== 'off' && effort !== 'default' && !sent) return 'invalid-effort'
+                if (sent && !controlledProfile.capabilities.validReasoningEfforts.includes(sent)) {
+                  return 'invalid-effort'
+                }
+                const result = await controlledClient.updateTurnSettings(
+                  {
+                    threadId: controlledThreadId,
+                    expectedTurnId: controlledTurnId,
+                    effort: sent,
+                  },
+                  { signal: args.signal, timeoutMs: 30_000 }
+                )
+                if (result.applied === false) return 'target-unavailable'
+                currentReasoningEffort = sent ?? undefined
+                chatDiag({
+                  kind: 'codex-subscription-live-reasoning',
+                  profile: controlledProfile.modelHarnessProfileId,
+                  model: currentModelId,
+                  conv: args.conversationId,
+                  result: 'applied',
+                })
+                return 'applied'
+              },
+            })
           }
           if ((args.signal.aborted || planStopArmed) && turnId) {
             void currentClient.interruptTurn({ threadId, turnId }).catch(() => {})
@@ -4051,7 +4415,7 @@ export async function runCodexSubscriptionChat(
             !portableCompactionRequested &&
             inTurnCompactions < MAX_IN_TURN_COMPACTIONS &&
             compactionWindow > 0 &&
-            args.compactHistory &&
+            (runtimeProfile.nativeCompactionFirst || args.compactHistory) &&
             turnId &&
             contextTokens / compactionWindow >= IN_TURN_COMPACT_RATIO
           ) {
@@ -4077,6 +4441,7 @@ export async function runCodexSubscriptionChat(
         }
         return
       }
+      if (rootEvent && method === 'turn/completed') args.onTurnControl?.(null)
       if (!rootEvent && method.startsWith('item/')) {
         // Preserve only lifecycle/approval metadata. No child text or internal tool becomes a parent part;
         // useful managed-subagent progress is already aggregated in the `task` card.
@@ -4312,7 +4677,7 @@ export async function runCodexSubscriptionChat(
           await currentClient.interruptTurn({ threadId, turnId }).catch(() => undefined)
         }
         try {
-          await stopUnfinishedChildren()
+          await stopUnfinishedChildren(true)
         } catch (error) {
           // Do not rotate and replay a root turn while a managed child may still be mutating
           // the workspace. Retire the old root and surface the bounded drain failure instead.
@@ -4491,7 +4856,7 @@ export async function runCodexSubscriptionChat(
         const freshThreadRequest = currentClient.startThread(
           {
             ...threadOptions,
-            ...(args.mode === 'agent' && !args.reviewerRuntime ? {} : { environments: [] }),
+            ...(capabilityMode === 'agent' && !args.reviewerRuntime ? {} : { environments: [] }),
             ephemeral: false,
             dynamicTools: registrations,
           } as Parameters<CodexAppServerClient['startThread']>[0] & {
@@ -4583,8 +4948,8 @@ export async function runCodexSubscriptionChat(
             sandboxPolicy: sandboxPolicyFor(approval.sandbox, args.cwd),
             effort: currentReasoningEffort && currentReasoningEffort !== 'off' ? currentReasoningEffort : null,
             summary: 'auto',
-            personality: 'pragmatic',
-            collaborationMode: collaborationModeFor(args),
+            ...(runtimeProfile.personality ? { personality: runtimeProfile.personality } : {}),
+            collaborationMode: collaborationModeFor(args, currentReasoningEffort),
           },
           { timeoutMs: 0 }
         )
@@ -4737,6 +5102,70 @@ export async function runCodexSubscriptionChat(
         latestUsage = null
         // compactHistory reads the durable conversation; publish all partial output from the interrupted provider first.
         persistNow()
+        if (runtimeProfile.nativeCompactionFirst) {
+          const beforeNative = interruptedUsage ? usageTotals(interruptedUsage.tokenUsage.total) : baseline
+          try {
+            nativeCompactionActive = true
+            const nativeUsage = await compactCodexSubscriptionThread(currentClient, threadId, args.signal)
+            const nativeBaseline = nativeUsage ?? beforeNative
+            if (nativeUsage) {
+              carriedMainUsage.totalInput += nonNegativeDifference(
+                nativeUsage.inputTokens,
+                beforeNative.inputTokens
+              )
+              carriedMainUsage.cachedInput += nonNegativeDifference(
+                nativeUsage.cachedInputTokens,
+                beforeNative.cachedInputTokens
+              )
+              carriedMainUsage.output += nonNegativeDifference(
+                nativeUsage.outputTokens,
+                beforeNative.outputTokens
+              )
+            }
+            baseline = nativeBaseline
+            inTurnCompactions += 1
+            apply(
+              {
+                kind: 'compaction',
+                messageId: assistantId,
+                partId: randomUUID(),
+                text: 'Context compacted by the Codex runtime.',
+                strategy: 'codex-native',
+                usage: withSubagentUsage(mainUsage(null), childUsage, args.selection.providerId, externalSubagentUsage),
+              },
+              true
+            )
+            chatDiag({
+              kind: 'codex-subscription-native-compaction',
+              profile: runtimeProfile.modelHarnessProfileId,
+              model: args.selection.modelId,
+              conv: args.conversationId,
+              result: 'success',
+            })
+            const continueMessageId = randomUUID()
+            input = [codexTextInput(PORTABLE_CONTINUE_PROMPT)]
+            clientUserMessageId = continueMessageId
+            latestUsage = null
+            continue
+          } catch {
+            chatDiag({
+              kind: 'codex-subscription-native-compaction',
+              profile: runtimeProfile.modelHarnessProfileId,
+              model: args.selection.modelId,
+              conv: args.conversationId,
+              result: 'portable-fallback',
+            })
+          } finally {
+            nativeCompactionActive = false
+          }
+        }
+        if (!args.compactHistory) {
+          for (const activeThreadId of activeThreadIds) routeRegistration.removeThread(activeThreadId)
+          activeThreadIds = new Set()
+          await retireCodexThread(args.conversationId, threadId, threadAccountId)
+          threadDisposed = true
+          throw new Error('Codex portable intra-turn compaction is unavailable')
+        }
         let compacted: Awaited<ReturnType<NonNullable<RunCodexSubscriptionChatArgs['compactHistory']>>> = null
         try {
           compacted = await args.compactHistory!()
@@ -4812,7 +5241,7 @@ export async function runCodexSubscriptionChat(
         const freshThreadRequest = currentClient.startThread(
           {
             ...threadOptions,
-            ...(args.mode === 'agent' && !args.reviewerRuntime ? {} : { environments: [] }),
+            ...(capabilityMode === 'agent' && !args.reviewerRuntime ? {} : { environments: [] }),
             ephemeral: Boolean(args.ephemeralSession),
             dynamicTools: registrations,
           } as Parameters<CodexAppServerClient['startThread']>[0] & {
@@ -4897,6 +5326,19 @@ export async function runCodexSubscriptionChat(
       )
       if (terminalEventApplied) {
         // Failover already emitted the terminal stream event (accounts exhausted).
+      } else if (args.signal.aborted) {
+        // Stop may arrive while a failed quota turn is awaiting child recovery. The
+        // provider's terminal status predates that user action and must not surface an error.
+        settleCurrentAttempt('other')
+        apply(
+          {
+            kind: 'aborted',
+            messageId: assistantId,
+            usage,
+            responseDurationMs: responseDurationMs(responseStartedAt),
+          },
+          true
+        )
       } else if (result.turn.status === 'completed') {
         settleCurrentAttempt('success')
         apply(
@@ -4926,27 +5368,16 @@ export async function runCodexSubscriptionChat(
           )
         } else {
           settleCurrentAttempt('other')
-          if (args.signal.aborted)
-            apply(
-              {
-                kind: 'aborted',
-                messageId: assistantId,
-                usage,
-                responseDurationMs: responseDurationMs(responseStartedAt),
-              },
-              true
-            )
-          else
-            apply(
-              {
-                kind: 'finish',
-                messageId: assistantId,
-                finishReason: 'interrupted',
-                usage,
-                responseDurationMs: responseDurationMs(responseStartedAt),
-              },
-              true
-            )
+          apply(
+            {
+              kind: 'finish',
+              messageId: assistantId,
+              finishReason: 'interrupted',
+              usage,
+              responseDurationMs: responseDurationMs(responseStartedAt),
+            },
+            true
+          )
         }
       } else {
         settleCurrentAttempt('other')
@@ -4975,7 +5406,8 @@ export async function runCodexSubscriptionChat(
           modelId: currentModelId,
           toolSignature: signature,
           instructionHash,
-          lastMessageId: assistantId,
+          harnessProfile: runtimeProfile.modelHarnessProfileId,
+          lastMessageId: lastBindingMessageId,
           usage: finalUsage ? usageTotals(finalUsage.tokenUsage.total) : baseline,
           accountId: threadAccountId,
         })
@@ -5017,6 +5449,8 @@ export async function runCodexSubscriptionChat(
         )
     }
   } finally {
+    managedTaskRecoveryStop.abort()
+    args.onTurnControl?.(null)
     settleCurrentAttempt('other')
     // Deliberate order: (1) listener OFF so no new notification can queue another write; (2) await in-flight
     // writes. The runner is the lifecycle boundary (delete/truncate/wipe assume no writes outlive it), and

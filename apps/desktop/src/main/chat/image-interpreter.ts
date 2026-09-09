@@ -19,7 +19,7 @@
  * be answered — hence the prompt requests exhaustive literal transcription, not a summary.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { generateText } from 'ai'
 import { buildProviderOptions, type ChatImageInterpreter, type ChatMessage, type MessagePart } from '../../shared/chat'
 import { getAppSetting, setAppSetting } from '../store'
@@ -33,6 +33,7 @@ import {
   subscriptionAccountId,
 } from './catalog'
 import { getClaudeSubscriptionManager } from './claude-agent-sdk/manager'
+import { freezeFailoverChain } from './subscription-failover/config'
 import { getCodexSubscriptionManager } from './codex-subscription/manager'
 import { getApiKey, hasApiKey } from './credentials'
 import { getGitHubCopilotSubscriptionManager } from './github-copilot/manager'
@@ -464,9 +465,13 @@ function interpreterIdentityFingerprint(interpreter: ChatImageInterpreter): stri
     }
 
     if (isClaudeSubscriptionProvider(providerId)) {
-      const status = getClaudeSubscriptionManager(accountId).getStatusSnapshot()
-      if (!status) return ''
-      return status.accountFingerprint ? `sub:${status.accountFingerprint}:${status.accountEpoch}` : 'sub:signed-out'
+      const identities = freezeFailoverChain(providerId).map((id) => {
+        const status = getClaudeSubscriptionManager(subscriptionAccountId(id)).getStatusSnapshot()
+        return status ? [id, status.accountFingerprint ?? null, status.accountEpoch, status.authenticated] : null
+      })
+      if (identities.some((entry) => entry === null)) return ''
+      // An in-flight description may already be on B even while A's identity is unchanged.
+      return `claude-route:${createHash('sha256').update(JSON.stringify(identities)).digest('hex')}`
     }
 
     if (isGrokSubscriptionProvider(providerId)) {
@@ -549,11 +554,7 @@ async function describeImage(
   // model calls. (Conversation meter excludes them — persistence would require extra history messages,
   // invalidating native-session resume; recorded decision.)
   const record = (
-    runtime:
-      | 'byok-ai-sdk'
-      | 'codex-subscription'
-      | 'github-copilot-subscription'
-      | 'claude-subscription',
+    runtime: 'byok-ai-sdk' | 'codex-subscription' | 'github-copilot-subscription' | 'claude-subscription',
     usage: DiagnosticUsage | undefined,
     details: { providerId?: string; modelId?: string; attempt?: number } = {}
   ): void => {
@@ -629,22 +630,35 @@ async function describeImage(
   }
 
   if (isClaudeSubscriptionProvider(providerId)) {
-    const manager = getClaudeSubscriptionManager(accountId)
-    const status = await manager.status({ refresh: true }).catch(() => null)
-    if (!status?.authenticated || !status.accountFingerprint)
-      throw new Error('Image interpreter provider is not authenticated.')
-    const result = await summarizeWithClaudeRuntime({
-      manager,
-      accountIdentity: { fingerprint: status.accountFingerprint, epoch: status.accountEpoch },
-      cwd,
+    const { runClaudeEphemeralWithFailover } = await import('./subscription-failover/claude-ephemeral')
+    const result = await runClaudeEphemeralWithFailover({
+      logicalProviderId: providerId,
       modelId,
-      system: SYSTEM,
-      prompt,
+      reasoningEffort: effort,
       signal,
-      images: [image],
-      ...(effort ? { effort } : {}),
+      conversationId,
+      extractAttemptUsage: extractIsolatedSummaryAttemptUsage,
+      mergeAttemptUsage: mergeIsolatedSummaryAttemptUsage,
+      onAttemptUsage: ({ target, attempt, usage }) =>
+        record('claude-subscription', usage, {
+          providerId: target.providerId,
+          modelId: target.runtimeModelId,
+          attempt,
+        }),
+      operation: (target, operationSignal) =>
+        summarizeWithClaudeRuntime({
+          manager: target.manager,
+          accountIdentity: target.accountIdentity,
+          cwd,
+          modelId: target.runtimeModelId,
+          system: SYSTEM,
+          prompt,
+          signal: operationSignal,
+          images: [image],
+          effort: target.reasoningEffort,
+          fastMode: target.fastMode,
+        }),
     })
-    record('claude-subscription', result.usage)
     return result.text
   }
 
@@ -773,8 +787,12 @@ export async function describeEphemeralToolImage(args: {
   const resolved = resolveEphemeralToolImage(args.image)
   if (!resolved) return null
   const name = args.image.name ?? 'tool-output-image'
-  const identity = interpreterIdentityFingerprint(interpreter)
-  const key = `${failureKey(args.image.id, args.conversationId, args.cwd, interpreter, identity)}\0${ephemeralImageNameDigest(name)}`
+  // Physical account may rotate; retain identity in the in-flight key but do not cache its result.
+  const fingerprint =
+    interpreterIdentityFingerprint(interpreter) ||
+    (isClaudeSubscriptionProvider(interpreter.providerId) ? `unknown:${randomUUID()}` : '')
+  const identity = isClaudeSubscriptionProvider(interpreter.providerId) ? '' : fingerprint
+  const key = `${failureKey(args.image.id, args.conversationId, args.cwd, interpreter, fingerprint)}\0${ephemeralImageNameDigest(name)}`
   // Unknown identity = nothing from previous/other identities may be reused.
   const cached = identity ? getDescribedEphemeralImage(key) : null
   if (cached) return cached
@@ -839,7 +857,9 @@ export async function describeConversationImages(args: DescribeImagesArgs): Prom
 async function describeConversationImagesInner(args: DescribeImagesArgs): Promise<DescribeImagesResult> {
   const interpreter = getImageInterpreter()
   if (!interpreter) return { described: 0, historyChanged: false }
-  const identity = interpreterIdentityFingerprint(interpreter)
+  const identity = isClaudeSubscriptionProvider(interpreter.providerId)
+    ? ''
+    : interpreterIdentityFingerprint(interpreter)
 
   // Order: pending message first (what user is viewing), then ACTIVE context from newest
   // to oldest — if capped, the oldest, least-relevant attachment remains undescribed.
@@ -903,11 +923,7 @@ async function describeConversationImagesInner(args: DescribeImagesArgs): Promis
     const parts = current.parts.map((part) => {
       if (part.type !== 'file' || part.kind !== 'image') return part
       const described = describedById.get(part.id)
-      if (
-        described?.kind !== 'image' ||
-        part.artifactId !== described.artifactId ||
-        part.data !== described.data
-      )
+      if (described?.kind !== 'image' || part.artifactId !== described.artifactId || part.data !== described.data)
         return part
       // Already described by a newer cycle, or not described this cycle → retain current state.
       if (!described.description?.trim() || part.description?.trim()) return part

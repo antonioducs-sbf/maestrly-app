@@ -47,6 +47,7 @@ export interface ClaudeManagedTaskResult {
 export type ClaudeManagedTaskRunner = (
   input: unknown,
   toolCallId: string,
+  /** Child host lifetime; a parent SDK transport disconnect must not abort it. */
   signal: AbortSignal,
   update: (state: ClaudeManagedTaskUpdate) => void
 ) => Promise<ClaudeManagedTaskResult>
@@ -63,8 +64,9 @@ export interface CreateClaudeTaskRuntimeArgs {
   reasoningEffort?: string
   /** Conversation speed variant, explicitly propagated to child runtimes. */
   fastMode: boolean
-  manager: ClaudeSubscriptionManager
-  accountIdentity: ClaudeSubscriptionAccountIdentity
+  /** Parent compatibility only; each Claude child admits its own physical account. */
+  manager?: ClaudeSubscriptionManager
+  accountIdentity?: ClaudeSubscriptionAccountIdentity
   broker: PermissionBroker
   questionBroker: QuestionBroker
   assistantId: string
@@ -286,7 +288,6 @@ export function createClaudeTaskRuntime(args: CreateClaudeTaskRuntimeArgs): Clau
           onGeneratedImageUsage: args.onGeneratedImageUsage,
           account: {
             parentProviderId: args.selection.providerId,
-            claude: { manager: args.manager, identity: args.accountIdentity },
           },
         })
         recordSubagentUsage(worker.model, worker.usage, worker.runtimeEstimatedCostUsd)

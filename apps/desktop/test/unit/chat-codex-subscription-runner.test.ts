@@ -17,6 +17,7 @@ import type { CodexAppServerClient } from '../../src/main/chat/codex-subscriptio
 import { CodexAppServerRpcError } from '../../src/main/chat/codex-subscription/client'
 import type { CodexNotification, CodexServerRequest } from '../../src/main/chat/codex-subscription/protocol'
 import {
+  approvalConfig,
   compactCodexSubscriptionThread,
   dynamicToolRegistrations,
   maestrlyDeveloperInstructions,
@@ -350,6 +351,8 @@ class FakeCodexClient {
   readonly deleteThreadCalls: unknown[] = []
   readonly startTurnCalls: unknown[] = []
   readonly interruptTurnCalls: unknown[] = []
+  readonly steerTurnCalls: unknown[] = []
+  readonly updateTurnSettingsCalls: unknown[] = []
   readonly requestCalls: Array<{ method: string; params: unknown; options: unknown }> = []
 
   failure: Error | null = null
@@ -361,6 +364,10 @@ class FakeCodexClient {
   startTurnHook: ((params: unknown) => void | Promise<void>) | null = null
   deleteThreadHook: ((params: unknown) => void | Promise<void>) | null = null
   interruptTurnHook: ((params: unknown) => void | Promise<void>) | null = null
+  requestHook:
+    | ((method: string, params: unknown) => void | Record<string, unknown> | Promise<void | Record<string, unknown>>)
+    | null = null
+  initializeResult: { capabilities?: Record<string, boolean> | null } = { capabilities: null }
   private threadSequence = 0
   private readonly listeners = new Set<NotificationListener>()
   private readonly turnScripts: TurnScript[] = []
@@ -437,6 +444,16 @@ class FakeCodexClient {
     await this.interruptTurnHook?.(params)
   }
 
+  async steerTurn(params: unknown): Promise<{ accepted: true }> {
+    this.steerTurnCalls.push(params)
+    return { accepted: true }
+  }
+
+  async updateTurnSettings(params: unknown): Promise<{ applied: true }> {
+    this.updateTurnSettingsCalls.push(params)
+    return { applied: true }
+  }
+
   onNotification(listener: NotificationListener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
@@ -453,9 +470,9 @@ class FakeCodexClient {
     return this.serverRequestHandler(request, new AbortController().signal)
   }
 
-  async request(method: string, params: unknown, options?: unknown): Promise<Record<string, never>> {
+  async request(method: string, params: unknown, options?: unknown): Promise<Record<string, unknown>> {
     this.requestCalls.push({ method, params, options })
-    return {}
+    return (await this.requestHook?.(method, params)) ?? {}
   }
 
   waitForExit(): Promise<never> {
@@ -494,6 +511,7 @@ function runArgs(
     fastMode: true,
     serviceTier: 'priority',
     client: client as unknown as CodexAppServerClient,
+    eligibleChatGptSession: true,
     broker: {
       assert: vi.fn(async () => {}),
       assertDecision: vi.fn(async () => 'once' as const),
@@ -503,6 +521,41 @@ function runArgs(
     } as unknown as RunCodexSubscriptionChatArgs['questionBroker'],
     emit,
     signal: new AbortController().signal,
+  }
+}
+
+function astraRuntimeModel(): NonNullable<RunCodexSubscriptionChatArgs['runtimeModel']> {
+  return {
+    id: 'gpt-6-astra',
+    model: 'gpt-6-astra',
+    displayName: 'Astra',
+    description: '',
+    hidden: false,
+    supportedReasoningEfforts: [
+      { reasoningEffort: 'low', description: '' },
+      { reasoningEffort: 'high', description: '' },
+      { reasoningEffort: 'ultra', description: '' },
+    ],
+    defaultReasoningEffort: 'medium',
+    inputModalities: ['text', 'image'],
+    supportsPersonality: true,
+    serviceTiers: [],
+    defaultServiceTier: null,
+    legacySpeedTiers: [],
+    contextWindow: 1_000,
+    nominalContextWindow: 1_000,
+    maxContextWindow: 1_000,
+    effectiveContextWindowPercent: 100,
+    supportsExperimentalContext: null,
+    preferWebsockets: true,
+    supportsParallelToolCalls: true,
+    toolMode: 'code_mode_only',
+    multiAgentVersion: 2,
+    useResponsesLite: true,
+    supportedVerbosity: ['low', 'medium'],
+    defaultVerbosity: 'medium',
+    minimumClientVersion: '0.153.4',
+    isDefault: false,
   }
 }
 
@@ -1499,6 +1552,7 @@ describe('Codex subscription runner', () => {
       modelId: 'gpt-5.6-sol',
       toolSignature: expect.any(String),
       instructionHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      harnessProfile: 'openai-default-v1',
       lastMessageId: assistant.id,
       usage: {
         inputTokens: 120,
@@ -1975,6 +2029,116 @@ describe('Codex subscription runner', () => {
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
     })
+  })
+
+  it('gives Design the exact Agent approval policy for every permission mode', () => {
+    for (const permMode of ['ask', 'auto', 'full'] as const) {
+      expect(approvalConfig('design', permMode)).toEqual(approvalConfig('agent', permMode))
+    }
+    expect(approvalConfig('plan', 'full')).toEqual({ sandbox: 'read-only', approvalPolicy: 'never' })
+    expect(approvalConfig('ask', 'auto')).toEqual({ sandbox: 'read-only', approvalPolicy: 'untrusted' })
+  })
+
+  it('recreates Design instruction boundaries and removes them after returning to Agent', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    const client = new FakeCodexClient()
+    const modes = ['agent', 'design', 'agent'] as const
+
+    for (const [index, mode] of modes.entries()) {
+      const turn = index + 1
+      persistUser(conversation.id, `user_design_transition_${turn}`, `turn ${turn}`, turn * 2 - 1)
+      client.queueTurn({
+        turnId: `turn_design_transition_${turn}`,
+        notifications: [completedNotification(`thread_${turn}`, `turn_design_transition_${turn}`)],
+      })
+      const turnArgs = runArgs(conversation.id, workspace.id, conversation.cwd, client)
+      turnArgs.mode = mode
+      turnArgs.permMode = 'auto'
+      turnArgs.maestrlyUltra = mode === 'design'
+      await runCodexSubscriptionChat(turnArgs)
+    }
+
+    expect(client.startThreadCalls).toHaveLength(3)
+    expect(client.resumeThreadCalls).toHaveLength(0)
+    expect(client.deleteThreadCalls).toEqual([{ threadId: 'thread_1' }, { threadId: 'thread_2' }])
+    const started = client.startThreadCalls[0] as {
+      config: Record<string, unknown>
+      developerInstructions: string
+      dynamicTools: Array<{ name: string }>
+      environments?: unknown
+    }
+    const designStart = client.startThreadCalls[1] as {
+      config: Record<string, unknown>
+      developerInstructions: string
+      dynamicTools: Array<{ name: string }>
+      environments?: unknown
+    }
+    const agentRestart = client.startThreadCalls[2] as {
+      config: Record<string, unknown>
+      developerInstructions: string
+      dynamicTools: Array<{ name: string }>
+      environments?: unknown
+    }
+
+    expect(started.developerInstructions).not.toContain('# Maestrly Design mode')
+    expect(started.dynamicTools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['bash', 'task']))
+    expect(started.environments).toBeUndefined()
+    expect(designStart.config).toEqual(started.config)
+    expect(designStart.environments).toBeUndefined()
+    expect(designStart.developerInstructions.match(/# Maestrly Design mode — design-v1/g)).toHaveLength(1)
+    expect(designStart.dynamicTools.map((tool) => tool.name)).toEqual(started.dynamicTools.map((tool) => tool.name))
+    expect(agentRestart.config).toEqual(started.config)
+    expect(agentRestart.environments).toBeUndefined()
+    expect(agentRestart.developerInstructions).not.toContain('# Maestrly Design mode')
+    expect(agentRestart.dynamicTools.map((tool) => tool.name)).toEqual(started.dynamicTools.map((tool) => tool.name))
+
+    expect(client.startTurnCalls[1]).toMatchObject({
+      approvalPolicy: 'untrusted',
+      sandboxPolicy: {
+        type: 'workspaceWrite',
+        writableRoots: [conversation.cwd],
+        networkAccess: false,
+      },
+      collaborationMode: {
+        mode: 'default',
+        settings: {
+          developer_instructions: expect.stringContaining('## Design + Ultra guidance'),
+        },
+      },
+    })
+    expect(client.startTurnCalls[2]).toMatchObject({
+      collaborationMode: { mode: 'default', settings: { developer_instructions: null } },
+    })
+  })
+
+  it('layers the Design harness once over the native Astra profile with Agent tools', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    persistUser(conversation.id, 'user_design_astra', 'Build the prototype.', 1)
+    const client = new FakeCodexClient()
+    client.initializeResult = {
+      capabilities: { turnSteer: true, turnSettingsUpdate: true, requestUserInputAsync: true },
+    }
+    client.queueTurn({
+      turnId: 'turn_design_astra',
+      notifications: [completedNotification('thread_1', 'turn_design_astra')],
+    })
+    const args = runArgs(conversation.id, workspace.id, conversation.cwd, client)
+    args.mode = 'design'
+    args.selection = { providerId: 'builtin_codex_subscription', modelId: 'gpt-6-astra' }
+    args.runtimeModel = astraRuntimeModel()
+    args.reasoningEffort = 'high'
+
+    await runCodexSubscriptionChat(args)
+
+    const started = client.startThreadCalls[0] as {
+      developerInstructions: string
+      dynamicTools: Array<{ name: string }>
+    }
+    expect(started.developerInstructions.match(/# Maestrly Design mode — design-v1/g)).toHaveLength(1)
+    expect(started.developerInstructions).toContain('Design mode has Agent-equivalent capabilities')
+    expect(started.dynamicTools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['bash', 'task']))
   })
 
   it('discards the created thread when teardown wins the race before the first turn', async () => {
@@ -2928,7 +3092,7 @@ describe('Codex subscription runner', () => {
     args.broker = broker
     const running = runCodexSubscriptionChat(args)
 
-    await vi.waitFor(() => expect(client.startTurnCalls).toHaveLength(1))
+    await vi.waitFor(() => expect(client.startTurnCalls).toHaveLength(1), { timeout: 10_000 })
     const numericId = client.serverRequest({
       id: 7,
       method: 'item/commandExecution/requestApproval',
@@ -4985,10 +5149,7 @@ describe('Codex subscription runner', () => {
         profile,
         agentName: 'general-purpose',
         task: 'Review the flow with Opus.',
-        accountIdentity: {
-          fingerprint: 'sha256:claude-account',
-          epoch: 3,
-        },
+        prepareTarget: expect.any(Function),
       })
     )
     expect(client.startThreadCalls).toHaveLength(1)
@@ -5042,6 +5203,197 @@ describe('Codex subscription runner', () => {
         },
       ],
     })
+  })
+
+  it('keeps one Codex child card while the shared Claude runner rotates accounts', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    persistUser(conversation.id, 'user_codex_to_claude', 'Use Claude Opus as a worker', 1)
+    const client = new FakeCodexClient()
+    client.queueTurn({ turnId: 'turn_codex_to_claude', notifications: [] })
+    const profile = {
+      version: 1 as const,
+      agentName: 'general-purpose',
+      effective: {
+        providerId: 'builtin_claude_subscription',
+        modelId: 'opus[1m]',
+        configuredEffort: 'xhigh',
+        sentEffort: 'xhigh',
+        source: 'conversation-default' as const,
+        candidateIndex: 0,
+      },
+      attempts: [],
+    }
+    resolveSubagentExecutionProfileMock.mockResolvedValueOnce({
+      definition: {
+        name: 'general-purpose',
+        description: 'Worker',
+        prompt: 'Complete the delegated task.',
+        source: 'built-in',
+        tools: ['read', 'grep'],
+      },
+      profile,
+    })
+    const actual = await vi.importActual<typeof import('../../src/main/chat/claude-agent-sdk/subagent-runner')>(
+      '../../src/main/chat/claude-agent-sdk/subagent-runner'
+    )
+    const adapter = await import('../../src/main/chat/subscription-failover/claude-adapter')
+    const config = await import('../../src/main/chat/subscription-failover/config')
+    const targets = ['builtin_claude_subscription', 'builtin_claude_subscription@acc_b'].map((providerId, index) => {
+      const message = {
+        type: 'result',
+        subtype: index ? 'success' : 'error_during_execution',
+        session_id: `claude-child-${index}`,
+        result: index ? 'Claude Opus result' : '',
+        errors: index ? [] : ["You've hit your limit · resets tomorrow"],
+        total_cost_usd: index ? 0.0044 : 0.002,
+        usage: {
+          input_tokens: index ? 6 : 5,
+          output_tokens: index ? 10 : 7,
+          cache_read_input_tokens: index ? 70 : 60,
+          cache_creation_input_tokens: index ? 22 : 20,
+        },
+      }
+      const query = {
+        initializationResult: async () => ({ account: { apiProvider: 'firstParty' } }),
+        close: vi.fn(),
+        interrupt: vi.fn(async () => {}),
+        async *[Symbol.asyncIterator]() {
+          yield message
+        },
+      }
+      const manager = {
+        createQuery: vi.fn(() => query),
+        assertAccountIdentity: vi.fn(),
+        assertSubscriptionRuntimeAccount: vi.fn(),
+      }
+      return {
+        providerId,
+        manager,
+        accountId: index ? 'acc_b' : null,
+        accountIdentity: { fingerprint: `account-${index}`, epoch: 1 },
+        model: { value: 'opus[1m]', resolvedModel: 'claude-opus-4-6' },
+        runtimeModelId: 'claude-opus-4-6',
+        reasoningEffort: 'xhigh',
+        fastMode: false,
+        maestrlyUltra: false,
+        contextWindow: 200_000,
+      }
+    })
+    const freeze = vi
+      .spyOn(config, 'freezeFailoverChain')
+      .mockImplementation((id) =>
+        id === 'builtin_claude_subscription' ? targets.map((target) => target.providerId) : [id]
+      )
+    const resolve = vi
+      .spyOn(adapter, 'resolveClaudeRuntimeTarget')
+      .mockResolvedValueOnce({
+        ok: true,
+        target:
+          targets[0] as unknown as import('../../src/main/chat/subscription-failover/claude-adapter').ClaudeRuntimeTarget,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        target:
+          targets[1] as unknown as import('../../src/main/chat/subscription-failover/claude-adapter').ClaudeRuntimeTarget,
+      })
+    const settle = vi.spyOn(adapter, 'settleClaudeAttempt').mockImplementation(() => {})
+    runClaudeSubagentMock.mockImplementationOnce(actual.runClaudeSubagent)
+    const events: ChatStreamEvent[] = []
+    const args = runArgs(conversation.id, workspace.id, conversation.cwd, client, (event) => events.push(event))
+    args.mode = 'agent'
+    const running = runCodexSubscriptionChat(args)
+
+    await vi.waitFor(() => expect(client.startTurnCalls).toHaveLength(1))
+    await expect(
+      client.serverRequest({
+        id: 'task_codex_to_claude',
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread_1',
+          itemId: 'task_codex_to_claude',
+          callId: 'task_codex_to_claude',
+          tool: 'task',
+          arguments: { agent: 'general-purpose', prompt: 'Review the flow with Opus.' },
+        },
+      })
+    ).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Claude Opus result' }],
+      success: true,
+    })
+    expect(runClaudeSubagentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profile,
+        agentName: 'general-purpose',
+        task: 'Review the flow with Opus.',
+        prepareTarget: expect.any(Function),
+      })
+    )
+    expect(client.startThreadCalls).toHaveLength(1)
+
+    client.emit(
+      usageNotification('thread_1', 'turn_codex_to_claude', {
+        total: breakdown(60, 10, 13),
+        last: breakdown(60, 10, 13),
+      })
+    )
+    client.emit(completedNotification('thread_1', 'turn_codex_to_claude'))
+    await running
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: 'tool-state',
+        toolCallId: 'task_codex_to_claude',
+        state: expect.objectContaining({
+          status: 'completed',
+          output: 'Claude Opus result',
+          sub: expect.objectContaining({
+            profile,
+            usage: {
+              input: 11,
+              output: 17,
+              cacheRead: 130,
+              cacheCreate: 42,
+            },
+            runtimeEstimatedCostUsd: 0.0064,
+            startedAt: expect.any(Number),
+            durationMs: expect.any(Number),
+            sessionId: expect.stringMatching(/^subagent-/),
+          }),
+        }),
+      })
+    )
+    expect(assistantMessages(conversation.id)[0].usage).toMatchObject({
+      subInput: 11,
+      subOutput: 17,
+      subCachedInput: 130,
+      subCacheCreate: 42,
+      subagentUsage: [
+        {
+          providerId: 'builtin_claude_subscription@acc_b',
+          modelId: 'opus[1m]',
+          input: 11,
+          output: 17,
+          cachedInput: 130,
+          cacheCreate: 42,
+          runtimeEstimatedCostUsd: 0.0064,
+        },
+      ],
+    })
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(settle.mock.calls.map(([, outcome]) => outcome)).toEqual(['quota', 'success'])
+    expect(targets[1].manager.createQuery.mock.calls[0]).toBeDefined()
+    expect(runClaudeSubagentMock).toHaveBeenCalledTimes(1)
+    expect(
+      new Set(
+        events
+          .filter((event) => event.kind === 'tool-state' && event.toolCallId === 'task_codex_to_claude')
+          .map((event) => ('toolCallId' in event ? event.toolCallId : null))
+      )
+    ).toEqual(new Set(['task_codex_to_claude']))
+    freeze.mockRestore()
+    resolve.mockRestore()
+    settle.mockRestore()
   })
 
   it('dispatches a Codex parent to official GitHub Copilot without falling through to the BYOK runner', async () => {
@@ -5587,7 +5939,7 @@ describe('Codex subscription runner', () => {
       expect(existsSync(path.join(artifactsRoot, conversation.id))).toBe(false)
     })
 
-    it('uses the host-managed tool in Agent and blocks native imagegen and the tool in Ask and Plan', async () => {
+    it('uses the host-managed tool in Agent and Design and blocks native imagegen in every mode', async () => {
       const workspace = makeWorkspace()
       const agentConversation = makeConversation(workspace.id, {})
       persistUser(agentConversation.id, 'user_img_cfg_agent', 'Generate a robot', 1)
@@ -5605,6 +5957,22 @@ describe('Codex subscription runner', () => {
         dynamicTools: expect.arrayContaining([expect.objectContaining({ name: 'generate_image' })]),
       })
 
+      const designConversation = makeConversation(workspace.id, {})
+      persistUser(designConversation.id, 'user_img_cfg_design', 'Design a robot', 1)
+      const designClient = new FakeCodexClient()
+      designClient.queueTurn({
+        turnId: 'turn_cfg_design',
+        notifications: [completedNotification('thread_1', 'turn_cfg_design')],
+      })
+      const designArgs = runArgs(designConversation.id, workspace.id, designConversation.cwd, designClient)
+      designArgs.mode = 'design'
+      designArgs.permMode = 'full'
+      await runCodexSubscriptionChat(designArgs)
+      expect(designClient.startThreadCalls[0]).toMatchObject({
+        config: { 'features.image_generation': false },
+        dynamicTools: expect.arrayContaining([expect.objectContaining({ name: 'generate_image' })]),
+      })
+
       const askConversation = makeConversation(workspace.id, {})
       persistUser(askConversation.id, 'user_img_cfg_ask', 'Generate a robot', 1)
       const askClient = new FakeCodexClient()
@@ -5618,7 +5986,7 @@ describe('Codex subscription runner', () => {
         dynamicTools: expect.not.arrayContaining([expect.objectContaining({ name: 'generate_image' })]),
       })
 
-      // Plan is read-only, but the RUNTIME default for image_generation is `true` (0.153.2). Without the explicit
+      // Plan is read-only, but the RUNTIME default for image_generation is `true` (0.153.4). Without the explicit
       // flag, the mode would gain artifact writing by omission.
       const planConversation = makeConversation(workspace.id, {})
       persistUser(planConversation.id, 'user_img_cfg_plan', 'Plan a robot', 1)
@@ -6446,7 +6814,9 @@ describe('Codex subscription runner', () => {
       }
     })
 
-    it('keeps an in-flight Codex task during root failover without repeating the side effect', async () => {
+    it.each([
+      0, 20_000, 360_000,
+    ])('keeps an in-flight Codex task during root failover for %i ms without repeating the side effect', async (recoveryMs) => {
       const workspace = makeWorkspace()
       const conversation = makeConversation(workspace.id, {})
       persistUser(conversation.id, 'user_failover_child_in_flight', 'Delegate and continue', 1)
@@ -6521,6 +6891,7 @@ describe('Codex subscription runner', () => {
       })
       await vi.waitFor(() => expect(clientA.startTurnCalls).toHaveLength(2))
 
+      if (recoveryMs) vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
       clientA.emit(
         completedNotification(
           'thread_1',
@@ -6536,6 +6907,22 @@ describe('Codex subscription runner', () => {
         threadId: 'thread_2',
         turnId: 'turn_child_in_flight',
       })
+
+      if (recoveryMs) {
+        try {
+          await vi.advanceTimersByTimeAsync(recoveryMs)
+          if (recoveryMs === 360_000) {
+            // A different conversation can successfully probe A while this root still
+            // waits for its child. The old quota must not overwrite that newer success.
+            const router = getSubscriptionFailoverRouter()
+            const admitted = router.tryAdmit(PRIMARY)
+            expect(admitted.ok && admitted.lease).toBeTruthy()
+            if (admitted.ok) router.confirmAttemptSuccess(PRIMARY, admitted.lease)
+          }
+        } finally {
+          vi.useRealTimers()
+        }
+      }
 
       clientA.emit({
         method: 'item/agentMessage/delta',
@@ -6558,6 +6945,125 @@ describe('Codex subscription runner', () => {
       expect(clientA.startTurnCalls).toHaveLength(2)
       expect(clientB.startThreadCalls).toHaveLength(1)
       expect(clientB.startTurnCalls).toHaveLength(1)
+      expect(assistantMessages(conversation.id)[0].error).toBeUndefined()
+      expect(JSON.stringify(clientB.startTurnCalls[0])).toContain('Side effect completed once.')
+      if (recoveryMs === 360_000) expect(getSubscriptionFailoverRouter().getHealth(PRIMARY).state).toBe('available')
+    })
+
+    it.each([
+      { outcome: 'continue', childError: 'UsageLimitExceeded: weekly' },
+      { outcome: 'abort', childError: 'UsageLimitExceeded: weekly' },
+      { outcome: 'continue', childError: 'Rate limit reached' },
+    ])('recovers simultaneous quota: $outcome / $childError', async ({ outcome, childError }) => {
+      setAppSetting(
+        'chat.subscriptionAccounts',
+        JSON.stringify([{ id: 'acc_b', kind: 'codex-subscription', label: 'Account B', createdAt: 1 }])
+      )
+      setFailoverRoute({ primaryProviderId: PRIMARY, enabled: true, fallbackProviderIds: [FALLBACK] })
+      const workspace = makeWorkspace()
+      const conversation = makeConversation(workspace.id, {})
+      persistUser(conversation.id, 'user_simultaneous_quota', 'Delegate and continue', 1)
+      const clientA = new FakeCodexClient()
+      const clientB = new FakeCodexClient()
+      codexManagerBridge.setClient(clientB, 'acc_b')
+      clientA.queueTurn({ turnId: 'root_a', notifications: [] })
+      clientA.queueTurn({ turnId: 'child_a', notifications: [] })
+      clientA.requestHook = (method) => {
+        if (method === 'account/rateLimits/read') return { rateLimits: { primary: { usedPercent: 100 } } }
+      }
+      clientB.queueTurn({ turnId: 'child_b', notifications: [] })
+      clientB.queueTurn({
+        turnId: 'root_b',
+        notifications: [completedNotification('thread_2', 'root_b')],
+      })
+      clientB.interruptTurnHook = (params) => {
+        const { threadId, turnId } = params as { threadId: string; turnId: string }
+        clientB.emit(completedNotification(threadId, turnId, 'interrupted'))
+      }
+      resolveSubagentExecutionProfileMock.mockResolvedValueOnce({
+        definition: { name: 'explore', description: 'Explore', prompt: 'Inspect.', source: 'built-in' },
+        profile: {
+          version: 1,
+          agentName: 'explore',
+          effective: {
+            providerId: PRIMARY,
+            modelId: 'gpt-5.6-mini',
+            configuredEffort: 'high',
+            sentEffort: 'high',
+            source: 'conversation-agent',
+            candidateIndex: 0,
+          },
+          attempts: [],
+        },
+      })
+      const controller = new AbortController()
+      const events: ChatStreamEvent[] = []
+      const args = runArgs(conversation.id, workspace.id, conversation.cwd, clientA, (event) => events.push(event))
+      args.mode = 'agent'
+      args.signal = controller.signal
+      args.failoverChain = [PRIMARY, FALLBACK]
+      args.resolveNextTarget = vi.fn(async () => failoverTarget(clientB, FALLBACK, 'acc_b'))
+      args.onFailoverTransition = vi.fn()
+      const running = runCodexSubscriptionChat(args)
+      await vi.waitFor(() => expect(clientA.startTurnCalls).toHaveLength(1))
+      const taskResult = clientA.serverRequest({
+        id: 'simultaneous_task',
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread_1',
+          turnId: 'root_a',
+          itemId: 'simultaneous_task',
+          callId: 'simultaneous_task',
+          tool: 'task',
+          arguments: { agent: 'explore', prompt: 'Inspect the result once.' },
+        },
+      })
+      await vi.waitFor(() => expect(clientA.startTurnCalls).toHaveLength(2))
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      try {
+        clientA.emit(completedNotification('thread_1', 'root_a', 'failed', 'UsageLimitExceeded: weekly'))
+        await waitImmediate()
+        expect(getSubscriptionFailoverRouter().getHealth(PRIMARY).state).toBe('exhausted')
+        clientA.emit(completedNotification('thread_2', 'child_a', 'failed', childError))
+        await vi.waitFor(() => expect(clientB.startTurnCalls).toHaveLength(1))
+        await vi.advanceTimersByTimeAsync(20_000)
+      } finally {
+        vi.useRealTimers()
+      }
+      expect(events.some((event) => event.kind === 'error')).toBe(false)
+      expect(args.resolveNextTarget).not.toHaveBeenCalled()
+      if (outcome === 'abort') {
+        controller.abort()
+        await expect(taskResult).resolves.toMatchObject({ success: false })
+      } else {
+        clientB.emit({
+          method: 'item/agentMessage/delta',
+          params: { threadId: 'thread_1', turnId: 'child_b', itemId: 'answer', delta: 'Recovered child result.' },
+        })
+        clientB.emit(completedNotification('thread_1', 'child_b'))
+        await expect(taskResult).resolves.toMatchObject({ success: true })
+      }
+      await running
+      expect(events.some((event) => event.kind === 'error')).toBe(false)
+      expect(
+        events.filter((event) => event.kind === 'tool-input-start' && event.toolCallId === 'simultaneous_task')
+      ).toHaveLength(1)
+      expect(events.filter((event) => event.kind === 'message-start')).toHaveLength(1)
+      if (outcome === 'abort') {
+        expect(events.some((event) => event.kind === 'aborted')).toBe(true)
+        expect(args.resolveNextTarget).not.toHaveBeenCalled()
+        expect(clientB.startTurnCalls).toHaveLength(1)
+      } else {
+        expect(clientB.startTurnCalls).toHaveLength(2)
+        expect(JSON.stringify(clientB.startTurnCalls[1])).toContain('Recovered child result.')
+        expect(args.onFailoverTransition).toHaveBeenCalledWith(
+          expect.objectContaining({ scope: 'root', toProviderId: FALLBACK })
+        )
+        expect(args.onFailoverTransition).toHaveBeenCalledWith(
+          expect.objectContaining({ scope: 'subagent', toProviderId: FALLBACK })
+        )
+        expect(events.some((event) => event.kind === 'finish')).toBe(true)
+      }
     })
 
     it('aborts an in-flight Codex task when the root fails with a non-quota error', async () => {
@@ -8025,5 +8531,206 @@ describe('Codex subscription runner', () => {
     expect(input).not.toContain('fix round a')
     expect(input).not.toContain('findings round b')
     expect(input).not.toContain('fix round b')
+  })
+
+  it('creates profile boundaries for default → Astra → default while preserving same-profile model resume', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    const client = new FakeCodexClient()
+    client.initializeResult = {
+      capabilities: { turnSteer: true, turnSettingsUpdate: true, requestUserInputAsync: true },
+    }
+
+    persistUser(conversation.id, 'user_default_profile', 'default turn', 1)
+    client.queueTurn({
+      turnId: 'turn_default_profile',
+      notifications: [completedNotification('thread_1', 'turn_default_profile')],
+    })
+    await runCodexSubscriptionChat(runArgs(conversation.id, workspace.id, conversation.cwd, client))
+    expect(getCodexThreadBinding(conversation.id)?.harnessProfile).toBe('openai-default-v1')
+
+    persistUser(conversation.id, 'user_astra_profile', 'astra turn', 3)
+    const astraArgs = runArgs(conversation.id, workspace.id, conversation.cwd, client)
+    astraArgs.selection = { providerId: 'builtin_codex_subscription', modelId: 'gpt-6-astra' }
+    astraArgs.runtimeModel = astraRuntimeModel()
+    astraArgs.reasoningEffort = 'ultra'
+    client.queueTurn({
+      turnId: 'turn_astra_profile',
+      notifications: [completedNotification('thread_2', 'turn_astra_profile')],
+    })
+    await runCodexSubscriptionChat(astraArgs)
+    expect(client.deleteThreadCalls).toContainEqual({ threadId: 'thread_1' })
+    expect(getCodexThreadBinding(conversation.id)?.harnessProfile).toBe('openai-gpt-6-astra-v1')
+    const astraThread = client.startThreadCalls[1] as Record<string, any>
+    expect(astraThread.personality).toBeUndefined()
+    expect(astraThread.config.model_auto_compact_token_limit).toBeUndefined()
+    expect(astraThread.config['features.context_management.experimental_mode']).toBe(true)
+    expect(astraThread.developerInstructions).toContain('Native multi-agent tools are disabled')
+    expect((client.startTurnCalls[1] as Record<string, unknown>).personality).toBeUndefined()
+    expect(client.startTurnCalls[1]).toMatchObject({ effort: 'ultra' })
+
+    persistUser(conversation.id, 'user_restored_profile', 'back to current', 5)
+    client.queueTurn({
+      turnId: 'turn_restored_profile',
+      notifications: [completedNotification('thread_3', 'turn_restored_profile')],
+    })
+    await runCodexSubscriptionChat(runArgs(conversation.id, workspace.id, conversation.cwd, client))
+    expect(client.deleteThreadCalls).toContainEqual({ threadId: 'thread_2' })
+    expect(getCodexThreadBinding(conversation.id)?.harnessProfile).toBe('openai-default-v1')
+    expect((client.startThreadCalls[2] as Record<string, any>).personality).toBe('pragmatic')
+  })
+
+  it('publishes Astra steering and live-effort controls only for the active turn', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    persistUser(conversation.id, 'user_astra_controls', 'start long task', 1)
+    const client = new FakeCodexClient()
+    client.initializeResult = { capabilities: { turnSteer: true, turnSettingsUpdate: true } }
+    client.queueTurn({
+      turnId: 'turn_astra_controls',
+      notifications: [
+        {
+          method: 'turn/started',
+          params: { threadId: 'thread_1', turn: { id: 'turn_astra_controls', status: 'inProgress' } },
+        },
+      ],
+    })
+    const controls: Array<NonNullable<Parameters<NonNullable<RunCodexSubscriptionChatArgs['onTurnControl']>>[0]>> = []
+    const args = runArgs(conversation.id, workspace.id, conversation.cwd, client)
+    args.selection = { providerId: 'builtin_codex_subscription', modelId: 'gpt-6-astra' }
+    args.runtimeModel = astraRuntimeModel()
+    args.onTurnControl = (control) => {
+      if (control) controls.push(control)
+    }
+
+    const running = runCodexSubscriptionChat(args)
+    await vi.waitFor(() => expect(controls).toHaveLength(1))
+    await expect(controls[0].steer('also inspect tests', 'client-steer-1')).resolves.toBe('accepted')
+    await expect(controls[0].updateReasoning('ultra')).resolves.toBe('applied')
+    await expect(controls[0].updateReasoning('minimal')).resolves.toBe('invalid-effort')
+    expect(client.steerTurnCalls).toEqual([
+      {
+        threadId: 'thread_1',
+        expectedTurnId: 'turn_astra_controls',
+        input: [{ type: 'text', text: 'also inspect tests', text_elements: [] }],
+        clientUserMessageId: 'client-steer-1',
+      },
+    ])
+    expect(client.updateTurnSettingsCalls).toEqual([
+      { threadId: 'thread_1', expectedTurnId: 'turn_astra_controls', effort: 'ultra' },
+    ])
+    client.emit(completedNotification('thread_1', 'turn_astra_controls'))
+    await running
+    await expect(controls[0].steer('too late', 'client-steer-2')).resolves.toBe('target-unavailable')
+  })
+
+  it('compacts Astra natively in the same thread and bypasses the portable fallback on success', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    persistUser(conversation.id, 'user_astra_compaction', 'long astra task', 1)
+    const client = new FakeCodexClient()
+    client.queueTurn({
+      turnId: 'turn_astra_compact_1',
+      notifications: [
+        usageNotification(
+          'thread_1',
+          'turn_astra_compact_1',
+          { total: breakdown(950, 100, 10), last: breakdown(950, 100, 10) },
+          1_000
+        ),
+        completedNotification('thread_1', 'turn_astra_compact_1', 'interrupted'),
+      ],
+    })
+    client.queueTurn({
+      turnId: 'turn_astra_compact_2',
+      notifications: [
+        usageNotification(
+          'thread_1',
+          'turn_astra_compact_2',
+          { total: breakdown(1_100, 120, 20), last: breakdown(150, 20, 10) },
+          1_000
+        ),
+        completedNotification('thread_1', 'turn_astra_compact_2'),
+      ],
+    })
+    client.requestHook = (method) => {
+      if (method !== 'thread/compact/start') return
+      setImmediate(() => {
+        client.emit({
+          method: 'turn/started',
+          params: { threadId: 'thread_1', turn: { id: 'turn_native_compact', status: 'inProgress' } },
+        })
+        client.emit(
+          usageNotification(
+            'thread_1',
+            'turn_native_compact',
+            { total: breakdown(1_000, 110, 15), last: breakdown(50, 10, 5) },
+            1_000
+          )
+        )
+        client.emit(completedNotification('thread_1', 'turn_native_compact'))
+      })
+    }
+    const emitted: ChatStreamEvent[] = []
+    const compactHistory = vi.fn(async () => ({ summary: 'portable fallback' }))
+    const args = runArgs(conversation.id, workspace.id, conversation.cwd, client, (event) => emitted.push(event))
+    args.selection = { providerId: 'builtin_codex_subscription', modelId: 'gpt-6-astra' }
+    args.runtimeModel = astraRuntimeModel()
+    args.contextWindow = 1_000
+    args.compactHistory = compactHistory
+
+    await runCodexSubscriptionChat(args)
+    expect(client.requestCalls).toContainEqual(
+      expect.objectContaining({ method: 'thread/compact/start', params: { threadId: 'thread_1' } })
+    )
+    expect(compactHistory).not.toHaveBeenCalled()
+    expect(client.startThreadCalls).toHaveLength(1)
+    expect(client.deleteThreadCalls).toEqual([])
+    expect(emitted.find((event) => event.kind === 'compaction')).toMatchObject({ strategy: 'codex-native' })
+  })
+
+  it('retries one fresh Astra thread with experimental context disabled when the account is ineligible', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    persistUser(conversation.id, 'user_astra_context_fallback', 'run with astra', 1)
+    const client = new FakeCodexClient()
+    let rejected = false
+    client.startThreadHook = (params) => {
+      const config = (params as { config: Record<string, unknown> }).config
+      if (!rejected && config['features.context_management.experimental_mode'] === true) {
+        rejected = true
+        throw new Error('experimental context management is unavailable for this account')
+      }
+    }
+    client.queueTurn({
+      turnId: 'turn_astra_context_fallback',
+      notifications: [completedNotification('thread_1', 'turn_astra_context_fallback')],
+    })
+    const args = runArgs(conversation.id, workspace.id, conversation.cwd, client)
+    args.selection = { providerId: 'builtin_codex_subscription', modelId: 'gpt-6-astra' }
+    args.runtimeModel = astraRuntimeModel()
+
+    await runCodexSubscriptionChat(args)
+    expect(client.startThreadCalls).toHaveLength(2)
+    expect((client.startThreadCalls[0] as any).config['features.context_management.experimental_mode']).toBe(true)
+    expect((client.startThreadCalls[1] as any).config['features.context_management.experimental_mode']).toBe(false)
+    expect(getCodexThreadBinding(conversation.id)?.harnessProfile).toBe('openai-gpt-6-astra-v1')
+
+    persistUser(conversation.id, 'user_astra_context_fallback_2', 'continue with astra', 3)
+    client.queueTurn({
+      turnId: 'turn_astra_context_fallback_2',
+      notifications: [completedNotification('thread_1', 'turn_astra_context_fallback_2')],
+    })
+    const resumed = runArgs(conversation.id, workspace.id, conversation.cwd, client)
+    resumed.selection = { providerId: 'builtin_codex_subscription', modelId: 'gpt-6-astra' }
+    resumed.runtimeModel = astraRuntimeModel()
+    await runCodexSubscriptionChat(resumed)
+    expect(client.startThreadCalls).toHaveLength(2)
+    expect(client.resumeThreadCalls).toEqual([
+      expect.objectContaining({
+        threadId: 'thread_1',
+        config: expect.objectContaining({ 'features.context_management.experimental_mode': false }),
+      }),
+    ])
   })
 })

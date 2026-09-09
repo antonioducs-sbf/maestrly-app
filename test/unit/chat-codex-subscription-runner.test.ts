@@ -5149,10 +5149,7 @@ describe('Codex subscription runner', () => {
         profile,
         agentName: 'general-purpose',
         task: 'Review the flow with Opus.',
-        accountIdentity: {
-          fingerprint: 'sha256:claude-account',
-          epoch: 3,
-        },
+        prepareTarget: expect.any(Function),
       })
     )
     expect(client.startThreadCalls).toHaveLength(1)
@@ -5206,6 +5203,197 @@ describe('Codex subscription runner', () => {
         },
       ],
     })
+  })
+
+  it('keeps one Codex child card while the shared Claude runner rotates accounts', async () => {
+    const workspace = makeWorkspace()
+    const conversation = makeConversation(workspace.id, {})
+    persistUser(conversation.id, 'user_codex_to_claude', 'Use Claude Opus as a worker', 1)
+    const client = new FakeCodexClient()
+    client.queueTurn({ turnId: 'turn_codex_to_claude', notifications: [] })
+    const profile = {
+      version: 1 as const,
+      agentName: 'general-purpose',
+      effective: {
+        providerId: 'builtin_claude_subscription',
+        modelId: 'opus[1m]',
+        configuredEffort: 'xhigh',
+        sentEffort: 'xhigh',
+        source: 'conversation-default' as const,
+        candidateIndex: 0,
+      },
+      attempts: [],
+    }
+    resolveSubagentExecutionProfileMock.mockResolvedValueOnce({
+      definition: {
+        name: 'general-purpose',
+        description: 'Worker',
+        prompt: 'Complete the delegated task.',
+        source: 'built-in',
+        tools: ['read', 'grep'],
+      },
+      profile,
+    })
+    const actual = await vi.importActual<typeof import('../../src/main/chat/claude-agent-sdk/subagent-runner')>(
+      '../../src/main/chat/claude-agent-sdk/subagent-runner'
+    )
+    const adapter = await import('../../src/main/chat/subscription-failover/claude-adapter')
+    const config = await import('../../src/main/chat/subscription-failover/config')
+    const targets = ['builtin_claude_subscription', 'builtin_claude_subscription@acc_b'].map((providerId, index) => {
+      const message = {
+        type: 'result',
+        subtype: index ? 'success' : 'error_during_execution',
+        session_id: `claude-child-${index}`,
+        result: index ? 'Claude Opus result' : '',
+        errors: index ? [] : ["You've hit your limit · resets tomorrow"],
+        total_cost_usd: index ? 0.0044 : 0.002,
+        usage: {
+          input_tokens: index ? 6 : 5,
+          output_tokens: index ? 10 : 7,
+          cache_read_input_tokens: index ? 70 : 60,
+          cache_creation_input_tokens: index ? 22 : 20,
+        },
+      }
+      const query = {
+        initializationResult: async () => ({ account: { apiProvider: 'firstParty' } }),
+        close: vi.fn(),
+        interrupt: vi.fn(async () => {}),
+        async *[Symbol.asyncIterator]() {
+          yield message
+        },
+      }
+      const manager = {
+        createQuery: vi.fn(() => query),
+        assertAccountIdentity: vi.fn(),
+        assertSubscriptionRuntimeAccount: vi.fn(),
+      }
+      return {
+        providerId,
+        manager,
+        accountId: index ? 'acc_b' : null,
+        accountIdentity: { fingerprint: `account-${index}`, epoch: 1 },
+        model: { value: 'opus[1m]', resolvedModel: 'claude-opus-4-6' },
+        runtimeModelId: 'claude-opus-4-6',
+        reasoningEffort: 'xhigh',
+        fastMode: false,
+        maestrlyUltra: false,
+        contextWindow: 200_000,
+      }
+    })
+    const freeze = vi
+      .spyOn(config, 'freezeFailoverChain')
+      .mockImplementation((id) =>
+        id === 'builtin_claude_subscription' ? targets.map((target) => target.providerId) : [id]
+      )
+    const resolve = vi
+      .spyOn(adapter, 'resolveClaudeRuntimeTarget')
+      .mockResolvedValueOnce({
+        ok: true,
+        target:
+          targets[0] as unknown as import('../../src/main/chat/subscription-failover/claude-adapter').ClaudeRuntimeTarget,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        target:
+          targets[1] as unknown as import('../../src/main/chat/subscription-failover/claude-adapter').ClaudeRuntimeTarget,
+      })
+    const settle = vi.spyOn(adapter, 'settleClaudeAttempt').mockImplementation(() => {})
+    runClaudeSubagentMock.mockImplementationOnce(actual.runClaudeSubagent)
+    const events: ChatStreamEvent[] = []
+    const args = runArgs(conversation.id, workspace.id, conversation.cwd, client, (event) => events.push(event))
+    args.mode = 'agent'
+    const running = runCodexSubscriptionChat(args)
+
+    await vi.waitFor(() => expect(client.startTurnCalls).toHaveLength(1))
+    await expect(
+      client.serverRequest({
+        id: 'task_codex_to_claude',
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread_1',
+          itemId: 'task_codex_to_claude',
+          callId: 'task_codex_to_claude',
+          tool: 'task',
+          arguments: { agent: 'general-purpose', prompt: 'Review the flow with Opus.' },
+        },
+      })
+    ).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Claude Opus result' }],
+      success: true,
+    })
+    expect(runClaudeSubagentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profile,
+        agentName: 'general-purpose',
+        task: 'Review the flow with Opus.',
+        prepareTarget: expect.any(Function),
+      })
+    )
+    expect(client.startThreadCalls).toHaveLength(1)
+
+    client.emit(
+      usageNotification('thread_1', 'turn_codex_to_claude', {
+        total: breakdown(60, 10, 13),
+        last: breakdown(60, 10, 13),
+      })
+    )
+    client.emit(completedNotification('thread_1', 'turn_codex_to_claude'))
+    await running
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: 'tool-state',
+        toolCallId: 'task_codex_to_claude',
+        state: expect.objectContaining({
+          status: 'completed',
+          output: 'Claude Opus result',
+          sub: expect.objectContaining({
+            profile,
+            usage: {
+              input: 11,
+              output: 17,
+              cacheRead: 130,
+              cacheCreate: 42,
+            },
+            runtimeEstimatedCostUsd: 0.0064,
+            startedAt: expect.any(Number),
+            durationMs: expect.any(Number),
+            sessionId: expect.stringMatching(/^subagent-/),
+          }),
+        }),
+      })
+    )
+    expect(assistantMessages(conversation.id)[0].usage).toMatchObject({
+      subInput: 11,
+      subOutput: 17,
+      subCachedInput: 130,
+      subCacheCreate: 42,
+      subagentUsage: [
+        {
+          providerId: 'builtin_claude_subscription@acc_b',
+          modelId: 'opus[1m]',
+          input: 11,
+          output: 17,
+          cachedInput: 130,
+          cacheCreate: 42,
+          runtimeEstimatedCostUsd: 0.0064,
+        },
+      ],
+    })
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(settle.mock.calls.map(([, outcome]) => outcome)).toEqual(['quota', 'success'])
+    expect(targets[1].manager.createQuery.mock.calls[0]).toBeDefined()
+    expect(runClaudeSubagentMock).toHaveBeenCalledTimes(1)
+    expect(
+      new Set(
+        events
+          .filter((event) => event.kind === 'tool-state' && event.toolCallId === 'task_codex_to_claude')
+          .map((event) => ('toolCallId' in event ? event.toolCallId : null))
+      )
+    ).toEqual(new Set(['task_codex_to_claude']))
+    freeze.mockRestore()
+    resolve.mockRestore()
+    settle.mockRestore()
   })
 
   it('dispatches a Codex parent to official GitHub Copilot without falling through to the BYOK runner', async () => {

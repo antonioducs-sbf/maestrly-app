@@ -15,6 +15,8 @@ const h = vi.hoisted(() => ({
   recordModelCallUsage: vi.fn(),
   hasApiKey: vi.fn((_providerId: string) => true),
   runCodexEphemeralWithFailover: vi.fn(),
+  runClaudeEphemeralWithFailover: vi.fn(),
+  summarizeWithClaudeRuntime: vi.fn(),
   summarizeWithCodexRuntime: vi.fn(),
 }))
 const generateText = h.generateText
@@ -45,10 +47,14 @@ vi.mock('../../src/main/chat/subscription-failover', async (importOriginal) => {
     runCodexEphemeralWithFailover: (...args: unknown[]) => h.runCodexEphemeralWithFailover(...args),
   }
 })
+vi.mock('../../src/main/chat/subscription-failover/claude-ephemeral', () => ({
+  runClaudeEphemeralWithFailover: (...args: unknown[]) => h.runClaudeEphemeralWithFailover(...args),
+}))
 vi.mock('../../src/main/chat/portable-summarizer', async (importOriginal) => {
   const original = await importOriginal<typeof import('../../src/main/chat/portable-summarizer')>()
   return {
     ...original,
+    summarizeWithClaudeRuntime: (...args: unknown[]) => h.summarizeWithClaudeRuntime(...args),
     summarizeWithCodexRuntime: (...args: unknown[]) => h.summarizeWithCodexRuntime(...args),
   }
 })
@@ -117,6 +123,8 @@ beforeEach(() => {
   recordModelCallUsage.mockReset()
   hasApiKey.mockReset()
   hasApiKey.mockReturnValue(true)
+  h.runClaudeEphemeralWithFailover.mockReset()
+  h.summarizeWithClaudeRuntime.mockReset()
   h.runCodexEphemeralWithFailover.mockReset()
   h.summarizeWithCodexRuntime.mockReset()
   generateText.mockResolvedValue({
@@ -1624,4 +1632,127 @@ describe('conditional post-turn image enrichment persistence', () => {
     expect(getOpenAIInferenceState('a1')).toBeNull()
     expect(getToolExecution('c', 'shot-1')).toBeNull()
   })
+})
+
+it('routes Claude images through the physical target and avoids caching rotated results', async () => {
+  const { CLAUDE_SUBSCRIPTION_PROVIDER_ID } = await import('../../src/main/chat/catalog')
+  setImageInterpreter({ providerId: CLAUDE_SUBSCRIPTION_PROVIDER_ID, modelId: 'vision-model' })
+  const usage = { input: 4, output: 2, cacheRead: 0, cacheCreate: 0, totalInput: 4 }
+  h.summarizeWithClaudeRuntime.mockResolvedValue({ text: 'Rotated image.', usage })
+  const target = {
+    providerId: `${CLAUDE_SUBSCRIPTION_PROVIDER_ID}@b`,
+    runtimeModelId: 'resolved',
+    accountIdentity: { fingerprint: 'b', epoch: 2 },
+    manager: {},
+    fastMode: false,
+  }
+  h.runClaudeEphemeralWithFailover.mockImplementation(async (args: any) => {
+    const result = await args.operation(target, args.signal)
+    args.onAttemptUsage({ target, attempt: 2, usage, outcome: 'success' })
+    return result
+  })
+  const image = toolOutputImages(
+    modelOutputToChatToolOutput({
+      type: 'content',
+      value: [{ type: 'file', data: { type: 'data', data: 'FFFF' }, mediaType: 'image/png' }],
+    })
+  )[0]!
+  const args = { image, conversationId: 'c', cwd: '/tmp/w', signal: new AbortController().signal }
+  await expect(describeEphemeralToolImage(args)).resolves.toMatchObject({ text: 'Rotated image.' })
+  await expect(describeEphemeralToolImage(args)).resolves.toMatchObject({ text: 'Rotated image.' })
+  expect(h.summarizeWithClaudeRuntime).toHaveBeenCalledTimes(2)
+  expect(h.summarizeWithClaudeRuntime).toHaveBeenCalledWith(
+    expect.objectContaining({
+      accountIdentity: target.accountIdentity,
+      modelId: 'resolved',
+      images: [expect.objectContaining({ base64: 'FFFF', mediaType: 'image/png' })],
+    })
+  )
+  expect(recordModelCallUsage).toHaveBeenCalledWith(
+    expect.objectContaining({ providerId: target.providerId, attempt: 2, usage })
+  )
+})
+
+it('does not share an old Claude in-flight description across account identity changes', async () => {
+  const { CLAUDE_SUBSCRIPTION_PROVIDER_ID } = await import('../../src/main/chat/catalog')
+  const { getClaudeSubscriptionManager } = await import('../../src/main/chat/claude-agent-sdk/manager')
+  const snapshot = vi.spyOn(getClaudeSubscriptionManager(), 'getStatusSnapshot')
+  snapshot.mockReturnValue({ accountFingerprint: 'a', accountEpoch: 1 } as any)
+  setImageInterpreter({ providerId: CLAUDE_SUBSCRIPTION_PROVIDER_ID, modelId: 'vision-model' })
+  let release!: (value: { text: string }) => void
+  h.runClaudeEphemeralWithFailover
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    .mockResolvedValue({ text: 'New account' })
+  const image = toolOutputImages(
+    modelOutputToChatToolOutput({
+      type: 'content',
+      value: [{ type: 'file', data: { type: 'data', data: 'FFFF' }, mediaType: 'image/png' }],
+    })
+  )[0]!
+  const args = { image, conversationId: 'c', cwd: '/tmp/w', signal: new AbortController().signal }
+  try {
+    const old = describeEphemeralToolImage(args)
+    await vi.waitFor(() => expect(h.runClaudeEphemeralWithFailover).toHaveBeenCalledTimes(1))
+    snapshot.mockReturnValue({ accountFingerprint: 'b', accountEpoch: 2 } as any)
+    await expect(describeEphemeralToolImage(args)).resolves.toMatchObject({ text: 'New account' })
+    setImageInterpreter({ providerId: CLAUDE_SUBSCRIPTION_PROVIDER_ID, modelId: 'vision-model' })
+    release({ text: 'Old account' })
+    await old
+    await expect(describeEphemeralToolImage(args)).resolves.toMatchObject({ text: 'New account' })
+    expect(h.runClaudeEphemeralWithFailover).toHaveBeenCalledTimes(3)
+  } finally {
+    snapshot.mockRestore()
+  }
+})
+
+it('changes the in-flight key when only a Claude fallback identity changes', async () => {
+  const { CLAUDE_SUBSCRIPTION_PROVIDER_ID, addSubscriptionAccount } = await import('../../src/main/chat/catalog')
+  const { setFailoverRoute } = await import('../../src/main/chat/subscription-failover/config')
+  const { getClaudeSubscriptionManager } = await import('../../src/main/chat/claude-agent-sdk/manager')
+  const account = addSubscriptionAccount('claude-subscription', 'B')
+  setFailoverRoute({
+    primaryProviderId: CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+    enabled: true,
+    fallbackProviderIds: [`${CLAUDE_SUBSCRIPTION_PROVIDER_ID}@${account.id}`],
+  })
+  const primary = vi
+    .spyOn(getClaudeSubscriptionManager(), 'getStatusSnapshot')
+    .mockReturnValue({ accountFingerprint: 'A', accountEpoch: 1 } as any)
+  const fallback = vi
+    .spyOn(getClaudeSubscriptionManager(account.id), 'getStatusSnapshot')
+    .mockReturnValue({ accountFingerprint: 'B-old', accountEpoch: 1 } as any)
+  setImageInterpreter({ providerId: CLAUDE_SUBSCRIPTION_PROVIDER_ID, modelId: 'vision-model' })
+  let release!: (value: { text: string }) => void
+  h.runClaudeEphemeralWithFailover
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        })
+    )
+    .mockResolvedValue({ text: 'New fallback identity' })
+  const image = toolOutputImages(
+    modelOutputToChatToolOutput({
+      type: 'content',
+      value: [{ type: 'file', data: { type: 'data', data: 'FFFF' }, mediaType: 'image/png' }],
+    })
+  )[0]!
+  const args = { image, conversationId: 'c', cwd: '/tmp/w', signal: new AbortController().signal }
+  try {
+    const old = describeEphemeralToolImage(args)
+    await vi.waitFor(() => expect(h.runClaudeEphemeralWithFailover).toHaveBeenCalledTimes(1))
+    fallback.mockReturnValue({ accountFingerprint: 'B-new', accountEpoch: 2 } as any)
+    await expect(describeEphemeralToolImage(args)).resolves.toMatchObject({ text: 'New fallback identity' })
+    release({ text: 'Old fallback identity' })
+    await old
+    expect(h.runClaudeEphemeralWithFailover).toHaveBeenCalledTimes(2)
+  } finally {
+    primary.mockRestore()
+    fallback.mockRestore()
+  }
 })

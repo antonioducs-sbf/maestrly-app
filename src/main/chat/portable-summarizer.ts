@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { CopilotSession, SessionEvent } from '@github/copilot-sdk'
-import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKMessage, SDKResultMessage, SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk'
 import type { NormalizedAiUsage } from './runner'
 import type { CodexAppServerClient } from './codex-subscription/client'
 import { deleteEphemeralCodexThread } from './codex-subscription/lifecycle'
@@ -17,7 +17,9 @@ import type { ClaudeSubscriptionAccountIdentity, ClaudeSubscriptionManager } fro
 import { buildClaudeFastModeSettings } from './claude-agent-sdk/options'
 import { CLAUDE_DISALLOWED_NATIVE_TOOLS } from './claude-agent-sdk/tools'
 import { gatedClaudeHumanPrompt, gatedClaudeHumanText } from './claude-agent-sdk/user-prompt'
+import { classifyClaudeQuotaFailure, type ClaudeQuotaClassification } from './claude-agent-sdk/quota-error'
 import { normalizeClaudeUsage } from './claude-agent-sdk/usage'
+import { redactClaudeCredentials } from './claude-agent-sdk/errors'
 
 const safeTokens = (value: unknown): number => {
   const number = Number(value)
@@ -51,6 +53,10 @@ export interface IsolatedSummaryResult {
 /** Usage reported by an ephemeral Codex attempt before the attempt failed. */
 export type IsolatedSummaryAttemptError = Error & {
   partialUsage?: NormalizedAiUsage
+  runtimeEstimatedCostUsd?: number
+  rawFailure?: unknown
+  rateLimitInfo?: SDKRateLimitInfo
+  quotaClassification?: ClaudeQuotaClassification
 }
 
 function isolatedUsage(value: unknown): NormalizedAiUsage | undefined {
@@ -148,41 +154,57 @@ export async function summarizeWithClaudeRuntime(args: {
       ] as unknown as Parameters<typeof gatedClaudeHumanPrompt>[0])
     : gatedClaudeHumanText(args.prompt)
   const abortController = new AbortController()
-  const query = args.manager.createQuery({
-    prompt: prompt.prompt,
-    options: {
-      abortController,
-      cwd: args.cwd,
-      model: args.modelId,
-      ...(effort ? { effort } : {}),
-      systemPrompt: args.system,
-      settingSources: [],
-      ...(typeof args.fastMode === 'boolean'
-        ? {
-            settings: {
-              ...buildClaudeFastModeSettings(args.fastMode),
-              promptSuggestionEnabled: false,
-              autoMemoryEnabled: false,
-              autoCompactEnabled: false,
-              precomputeCompactionEnabled: false,
-            },
-          }
-        : {}),
-      strictMcpConfig: true,
-      mcpServers: {},
-      tools: [],
-      allowedTools: [],
-      disallowedTools: CLAUDE_DISALLOWED_NATIVE_TOOLS,
-      skills: [],
-      plugins: [],
-      agents: {},
-      permissionMode: 'dontAsk',
-      persistSession: false,
-      includePartialMessages: false,
-      promptSuggestions: false,
-    },
-  })
+  let query: ReturnType<ClaudeSubscriptionManager['createQuery']>
+  try {
+    query = args.manager.createQuery({
+      prompt: prompt.prompt,
+      options: {
+        abortController,
+        cwd: args.cwd,
+        model: args.modelId,
+        ...(effort ? { effort } : {}),
+        systemPrompt: args.system,
+        settingSources: [],
+        ...(typeof args.fastMode === 'boolean'
+          ? {
+              settings: {
+                ...buildClaudeFastModeSettings(args.fastMode),
+                promptSuggestionEnabled: false,
+                autoMemoryEnabled: false,
+                autoCompactEnabled: false,
+                precomputeCompactionEnabled: false,
+              },
+            }
+          : {}),
+        strictMcpConfig: true,
+        mcpServers: {},
+        tools: [],
+        allowedTools: [],
+        disallowedTools: CLAUDE_DISALLOWED_NATIVE_TOOLS,
+        skills: [],
+        plugins: [],
+        agents: {},
+        permissionMode: 'dontAsk',
+        persistSession: false,
+        includePartialMessages: false,
+        promptSuggestions: false,
+      },
+    })
+  } catch (error) {
+    prompt.reject(error)
+    throw Object.assign(
+      new Error(redactClaudeCredentials(error instanceof Error ? error.message : String(error)), { cause: error }),
+      {
+        rawFailure: error,
+        quotaClassification: classifyClaudeQuotaFailure(error),
+      }
+    )
+  }
   const textByMessage = new Map<string, string>()
+  const assistantUsage = new Map<string, NormalizedAiUsage>()
+  let rawFailure: unknown
+  let rateLimitInfo: SDKRateLimitInfo | undefined
+  const assistantCosts = new Map<string, number>()
   let result: SDKResultMessage | null = null
   const onAbort = () => {
     abortController.abort(args.signal.reason ?? new Error('Claude summary was aborted.'))
@@ -191,6 +213,7 @@ export async function summarizeWithClaudeRuntime(args: {
   }
   args.signal.addEventListener('abort', onAbort, { once: true })
   try {
+    args.signal.throwIfAborted()
     try {
       const initialized = await query.initializationResult()
       args.manager.assertSubscriptionRuntimeAccount(initialized.account, args.accountIdentity)
@@ -202,7 +225,14 @@ export async function summarizeWithClaudeRuntime(args: {
       throw error
     }
     for await (const message of query as AsyncIterable<SDKMessage>) {
+      if (message.type === 'rate_limit_event') rateLimitInfo = message.rate_limit_info
       if (message.type === 'assistant') {
+        if (message.error) rawFailure = message
+        if (message.message.usage)
+          assistantUsage.set(message.message.id ?? message.uuid, normalizeClaudeUsage(message.message.usage))
+        const reportedCost = (message as unknown as { total_cost_usd?: number }).total_cost_usd
+        if (typeof reportedCost === 'number' && Number.isFinite(reportedCost) && reportedCost >= 0)
+          assistantCosts.set(message.message.id ?? message.uuid, reportedCost)
         const text = message.message.content
           .filter((block) => block.type === 'text')
           .map((block) => block.text)
@@ -216,6 +246,8 @@ export async function summarizeWithClaudeRuntime(args: {
     args.manager.assertAccountIdentity(args.accountIdentity)
     if (args.signal.aborted) throw args.signal.reason ?? new Error('Claude summary was aborted.')
     if (result?.subtype !== 'success') {
+      if (result && result.subtype !== 'error_during_execution') rawFailure = result
+      else rawFailure ??= result
       throw new Error(
         result && 'errors' in result && result.errors.length
           ? result.errors.join('\n')
@@ -241,8 +273,29 @@ export async function summarizeWithClaudeRuntime(args: {
         ? { runtimeEstimatedCostUsd: Number(result?.total_cost_usd) }
         : {}),
     }
+  } catch (error) {
+    const failure = new Error(redactClaudeCredentials(error instanceof Error ? error.message : String(error)), {
+      cause: error,
+    }) as IsolatedSummaryAttemptError
+    failure.rawFailure = rawFailure ?? error
+    failure.rateLimitInfo = rateLimitInfo
+    failure.quotaClassification = classifyClaudeQuotaFailure(failure.rawFailure, rateLimitInfo)
+    failure.partialUsage = result?.usage
+      ? normalizeClaudeUsage(result.usage)
+      : [...assistantUsage.values()].reduce<NormalizedAiUsage | undefined>(
+          (sum, usage) => addIsolatedSummaryUsage(sum, usage),
+          undefined
+        )
+    const amount =
+      result?.total_cost_usd ??
+      (assistantCosts.size && [...assistantUsage.keys()].every((key) => assistantCosts.has(key))
+        ? [...assistantCosts.values()].reduce((sum, value) => sum + value, 0)
+        : undefined)
+    if (typeof amount === 'number' && Number.isFinite(amount) && amount >= 0) failure.runtimeEstimatedCostUsd = amount
+    throw failure
   } finally {
     args.signal.removeEventListener('abort', onAbort)
+    prompt.reject(new Error('Claude summary closed.'))
     query.close()
   }
 }

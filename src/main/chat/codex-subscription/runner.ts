@@ -98,7 +98,6 @@ import {
   isGitHubCopilotSubscriptionProvider,
   subscriptionAccountId,
 } from '../catalog'
-import { getClaudeSubscriptionManager } from '../claude-agent-sdk/manager'
 import { queueClaudeSessionCleanup } from '../claude-agent-sdk/session-store'
 import { runClaudeSubagent } from '../claude-agent-sdk/subagent-runner'
 import {
@@ -3681,77 +3680,70 @@ export async function runCodexSubscriptionChat(
                 })()
               : nativeClaude
                 ? await (async () => {
-                    const manager = getClaudeSubscriptionManager(subscriptionAccountId(profile.effective!.providerId))
-                    const status = await manager.status({ refresh: true })
-                    if (!status.authenticated || !status.accountFingerprint) {
-                      return { text: '', error: 'Claude subscription is not authenticated.' }
-                    }
-                    const accountId = manager.accountId ?? null
-                    let resolvedModelId: string | undefined
-                    if (profile.effective!.modelId.trim() === 'fable') {
-                      try {
-                        resolvedModelId =
-                          (await manager.resolveModelId(profile.effective!.modelId, signal, true)) ?? undefined
-                      } catch {
-                        return { text: '', error: 'Claude Fable alias could not be resolved.' }
-                      }
-                    }
-                    const behaviorProfile = resolveFableBehaviorProfile({
-                      requestedModelId: profile.effective!.modelId,
-                      resolvedModelId,
-                      enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
-                    }).profile
-                    const runtimeModelId = resolvedModelId ?? profile.effective!.modelId
-                    const runtimeSignature = claudeSubagentRuntimeSignature({
-                      modelId: runtimeModelId,
-                      behaviorProfileId: behaviorProfile?.id ?? null,
-                      prompt: effectiveDefinition.prompt,
-                      readOnly: codexReadOnly,
-                      sentEffort: profile.effective!.sentEffort,
-                      fastMode: profile.effective!.fastMode === true,
-                      toolNames: [...childToolNames],
-                    })
-                    const resume = resumeFor(profile.effective!.providerId, accountId, undefined, {
-                      modelId: runtimeModelId,
-                      behaviorProfileId: behaviorProfile?.id ?? null,
-                      runtimeSignature,
-                    })
+                    let runtimeSignature = ''
+                    let behaviorProfile: ReturnType<typeof resolveFableBehaviorProfile>['profile'] | undefined
                     const outcome = await runClaudeSubagent({
-                      manager,
-                      accountIdentity: {
-                        fingerprint: status.accountFingerprint,
-                        epoch: status.accountEpoch,
-                      },
                       conversationId: args.conversationId,
                       cwd: args.cwd,
                       profile,
-                      ...(resolvedModelId ? { resolvedModelId } : {}),
-                      behaviorProfile,
+                      prepareTarget: (target) => {
+                        if (behaviorProfile === undefined)
+                          behaviorProfile = resolveFableBehaviorProfile({
+                            requestedModelId: profile.effective!.modelId,
+                            resolvedModelId: target.runtimeModelId,
+                            enabled: getAppFlag(FABLE_51_PROFILE_FLAG, true),
+                          }).profile
+                        runtimeSignature = claudeSubagentRuntimeSignature({
+                          modelId: target.runtimeModelId,
+                          accountIdentity: target.accountIdentity,
+                          behaviorProfileId: behaviorProfile?.id ?? null,
+                          prompt: effectiveDefinition.prompt,
+                          readOnly: codexReadOnly,
+                          sentEffort: profile.effective!.sentEffort,
+                          fastMode: profile.effective!.fastMode === true,
+                          toolNames: [...childToolNames],
+                        })
+                        const resume = resumeFor(target.providerId, target.accountId, undefined, {
+                          modelId: target.runtimeModelId,
+                          behaviorProfileId: behaviorProfile?.id ?? null,
+                          runtimeSignature,
+                        })
+                        return {
+                          task: resume.task,
+                          behaviorProfile,
+                          ...(resume.handle?.kind === 'claude-session'
+                            ? {
+                                resume: {
+                                  sessionId: resume.handle.sessionId,
+                                  fallbackTask: resume.fallbackTask,
+                                  accountId: resume.handle.accountId,
+                                },
+                              }
+                            : {}),
+                        }
+                      },
                       definition: effectiveDefinition,
                       signal,
                       agentName,
-                      task: resume.task,
+                      task,
                       readOnly: codexReadOnly,
                       tools: claudeSubagentTools,
                       allowSkillLoader: args.mode === 'maestro',
                       progress,
                       onTextUpdate,
                       persistRuntime,
-                      ...(resume.handle?.kind === 'claude-session'
-                        ? { resume: { sessionId: resume.handle.sessionId, fallbackTask: resume.fallbackTask } }
-                        : {}),
-                      onSessionStarted: ({ sessionId }) => {
+                      onSessionStarted: ({ sessionId, target }) => {
                         if (!persistRuntime) return
                         sessionRecorder.runtimeHandle({
                           kind: 'claude-session',
                           sessionId,
                           cwd: args.cwd,
-                          accountId,
-                          modelId: runtimeModelId,
+                          accountId: target.accountId,
+                          modelId: target.runtimeModelId,
                           behaviorProfileId: behaviorProfile?.id ?? null,
                           runtimeSignature,
                         })
-                        queueClaudeSessionCleanup(args.conversationId, sessionId, args.cwd, accountId)
+                        queueClaudeSessionCleanup(args.conversationId, sessionId, args.cwd, target.accountId)
                       },
                     })
                     settleResume(outcome)

@@ -33,3 +33,34 @@ test('collapses, retains navigation and saves the desktop preference',async({pag
   await expect(page.locator('.workspace-shell')).not.toHaveClass(/sidebar-mobile-open/)
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
 })
+
+test('keeps account separate and footer utilities aligned at desktop and mobile widths',async({page},info)=>{
+ const L=(key:string)=>translate(key,info.project.name as Locale)
+ await page.route('**/api/**',route=>{
+  const path=new URL(route.request().url()).pathname
+  if(path.endsWith('/get-session'))return route.fulfill({json:{user:{id:'owner',name:'Maestrly owner',email:'owner@example.test'}}})
+  if(path.endsWith('/organizations'))return route.fulfill({json:[]})
+  return route.fulfill({json:[]})
+ })
+ await page.setViewportSize({width:1440,height:1000});await page.goto('/')
+ async function aligned(){
+  const actions=page.locator('.sidebar-footer-actions')
+  const language=await actions.getByRole('combobox').boundingBox(),buttons=await actions.locator(':scope > button').all()
+  expect(language).toBeTruthy();expect(buttons).toHaveLength(2)
+  for(const button of buttons){const box=await button.boundingBox();expect(Math.abs((box!.y+box!.height/2)-(language!.y+language!.height/2))).toBeLessThan(2)}
+  expect(await actions.evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true)
+ }
+ await aligned()
+ await page.locator('.rail-bottom').screenshot({path:info.outputPath('footer-expanded.png')})
+ await page.getByRole('button',{name:L('My account'),exact:true}).click()
+ await expect(page.getByRole('dialog',{name:L('My account'),exact:true})).toBeVisible()
+ await page.getByRole('button',{name:L('Cancel'),exact:true}).click()
+ await page.getByRole('button',{name:L('Close sidebar'),exact:true}).click()
+ await expect(page.locator('.sidebar-account .avatar')).toBeVisible()
+ await expect(page.locator('.sidebar-account-label')).toBeHidden()
+ await page.locator('.rail-bottom').screenshot({path:info.outputPath('footer-collapsed.png')})
+ await page.setViewportSize({width:390,height:844})
+ await page.getByRole('button',{name:L('Open sidebar'),exact:true}).click()
+ await aligned()
+ await page.locator('.rail-bottom').screenshot({path:info.outputPath('footer-mobile.png')})
+})

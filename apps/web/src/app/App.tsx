@@ -7,7 +7,7 @@ import { t, useLocale, LanguageSelector } from '../i18n/index.js'
 import { FormDialog } from '../components/FormDialog.js'
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeftClose, PanelLeftOpen, FolderKanban, Languages, Cpu, Monitor, UserRound } from 'lucide-react'
+import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeftClose, PanelLeftOpen, FolderKanban, Languages, Cpu, Monitor } from 'lucide-react'
 import type { Project, Board } from '@maestrly/protocol'
 import { api, write } from './api.js'
 import { Login } from '../features/auth/Login.js'
@@ -368,12 +368,13 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           ))}
         </nav>
         <div className="rail-bottom">
-          <div className="sidebar-user">
-            <div className="avatar">{session.user.name.slice(0, 2).toUpperCase()}</div>
-            <span>{session.user.name}</span>
-          </div>
+          <button className="sidebar-user sidebar-account" onClick={()=>{setPasswordChanged(false);setAccountOpen(true)}} aria-label={t('My account')} data-sidebar-tooltip={collapsed?t('My account'):undefined}>
+            <span className="avatar" aria-hidden="true">{session.user.name.slice(0, 2).toUpperCase()}</span>
+            <span className="sidebar-account-label"><strong>{session.user.name}</strong><small>{t('My account')}</small></span>
+          </button>
+          <div className="sidebar-footer-actions">
           {collapsed?<button className="sidebar-language-shortcut" aria-label={t('Language')} data-sidebar-tooltip={t('Language')} onClick={()=>setSidebarOpen(true)}><Languages size={19}/></button>:null}
-          <LanguageSelector />
+          <LanguageSelector compact />
           <button
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
             aria-label={t(theme === 'light' ? 'Use dark theme' : 'Use light theme')}
@@ -381,10 +382,10 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           >
             {theme === 'light' ? <Moon /> : <Sun />}
           </button>
-          <button onClick={()=>{setPasswordChanged(false);setAccountOpen(true)}} aria-label={t('My account')} data-sidebar-tooltip={collapsed?t('My account'):undefined}><UserRound/><span>{t('My account')}</span></button>
           <button onClick={() => void signOut()} aria-label={t('Sign out')} data-sidebar-tooltip={collapsed?t('Sign out'):undefined}>
             <LogOut />
           </button>
+          </div>
         </div>
       </aside>
       <main className="workspace-main">

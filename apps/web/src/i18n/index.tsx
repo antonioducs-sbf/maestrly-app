@@ -42,7 +42,7 @@ export function errorText(message: string) {
 }
 export function useLocale() { return useSyncExternalStore(subscribe, () => locale) }
 
-export function LanguageSelector() {
+export function LanguageSelector({ compact = false }: { compact?: boolean } = {}) {
   const language = useLocale()
   useEffect(() => {
     document.documentElement.lang = language
@@ -66,6 +66,6 @@ export function LanguageSelector() {
   }, [language])
   return <div className="language-selector"><span className="sr-only">{t('Language')}</span>
     <Select value={language} onChange={value => setLocale(value as Locale)} label={t('Language')}
-      options={[{value:'en',label:'English'},{value:'pt-BR',label:'Português (Brasil)'}]} />
+      options={[{value:'en',label:'English'},{value:'pt-BR',label:compact?'Português':'Português (Brasil)'}]} />
   </div>
 }

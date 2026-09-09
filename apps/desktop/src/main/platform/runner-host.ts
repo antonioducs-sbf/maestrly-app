@@ -1,3 +1,4 @@
+import { resolveClaude } from '../chat/claude-agent-sdk/resolve-claude'
 import { resolveCodexRuntime } from '../chat/codex-subscription/runtime-resolver'
 import { readyRuntimeAsset } from '../runtime-assets/app-service'
 import path from 'node:path'
@@ -224,7 +225,9 @@ export class EmbeddedRunnerHost {
       const commandRunner = new ContainerCommandRunner(
         process.env.MAESTRLY_COMMAND_IMAGE ?? 'maestrly/runner-executor:local'
       )
+      const claudeExecutable=resolveClaude()
       const catalog = new RuntimeCatalog({
+        claudeExecutable,
         codexExecutable,
         environment: {
           ...(process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {}),
@@ -243,6 +246,7 @@ export class EmbeddedRunnerHost {
         [
           'claude-agent',
           new ClaudeAgentExecutor({
+            executable:claudeExecutable,
             environment: process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {},
           }),
         ],

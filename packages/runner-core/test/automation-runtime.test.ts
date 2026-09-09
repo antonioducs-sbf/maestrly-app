@@ -47,10 +47,10 @@ describe('automation runtime',()=>{
  })
  it('applies Claude effort/fast and read-only permissions to the SDK',async()=>{
    const factory=vi.fn(()=>({async *[Symbol.asyncIterator](){yield {type:'result',subtype:'success',is_error:false,result:'Verified',total_cost_usd:0}},close(){}}))
-   const executor=new ClaudeAgentExecutor({queryFactory:factory as never,environment:{ANTHROPIC_API_KEY:'fixture'}})
+   const executor=new ClaudeAgentExecutor({executable:'/fixture/claude',queryFactory:factory as never,environment:{ANTHROPIC_API_KEY:'fixture'}})
    const c=context();c.readOnly=true;c.envelope.snapshot.effort='xhigh';c.envelope.snapshot.fastMode=true
    expect((await (await executor.start(c)).done).state).toBe('succeeded')
-   expect(factory).toHaveBeenCalledWith(expect.objectContaining({prompt:'Approved task',options:expect.objectContaining({effort:'xhigh',settings:{fastMode:true,fastModePerSessionOptIn:true},tools:['Read','Glob','Grep'],settingSources:[]})}))
+   expect(factory).toHaveBeenCalledWith(expect.objectContaining({prompt:'Approved task',options:expect.objectContaining({pathToClaudeCodeExecutable:'/fixture/claude',effort:'xhigh',settings:{fastMode:true,fastModePerSessionOptIn:true},tools:['Read','Glob','Grep'],settingSources:[]})}))
  })
  it('advertises only supported models and their concrete options',()=>{
    const models=codexModelCapabilities([{slug:'allowed',display_name:'Allowed',visibility:'list',supported_in_api:true,supported_reasoning_levels:[{effort:'high'}],service_tiers:[{id:'priority'}]},{slug:'hidden',visibility:'hide',supported_in_api:true}],new Set(['allowed','hidden']))

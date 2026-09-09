@@ -3,6 +3,7 @@ import os from 'node:os'
 import type { ExecutionContext, ExecutionHandle, ExecutionOutcome, ExecutorAdapter, ExecutorCapabilities } from '../executor.js'
 
 export interface ClaudeAgentExecutorOptions {
+  executable?:string
   queryFactory?: typeof query
   environment?: Record<string, string>
   maxTurns?: number
@@ -26,7 +27,7 @@ export class ClaudeAgentExecutor implements ExecutorAdapter {
   constructor(private readonly options: ClaudeAgentExecutorOptions = {}) {}
 
   async capabilities(): Promise<ExecutorCapabilities> {
-    return { executor: 'claude-agent', capabilities: [{ name: 'executor:claude-agent', version: '0.3.258', attributes: {} }, { name: 'delivery:patch', attributes: {} }] }
+    return { executor: 'claude-agent', capabilities: [{ name: 'executor:claude-agent', version: '0.3.263', attributes: {} }, { name: 'delivery:patch', attributes: {} }] }
   }
 
   async start(context: ExecutionContext): Promise<ExecutionHandle> {
@@ -37,6 +38,7 @@ export class ClaudeAgentExecutor implements ExecutorAdapter {
       prompt: promptFor(context),
       options: {
         abortController,
+        pathToClaudeCodeExecutable:this.options.executable,
         cwd: context.environment.workspacePath,
         model: context.envelope.snapshot.model,
         effort: context.envelope.snapshot.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined,

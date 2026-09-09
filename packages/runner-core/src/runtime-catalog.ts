@@ -53,6 +53,7 @@ export function claudeModelCapabilities(models: ModelInfo[]): ExecutorModel[] {
 export interface CatalogOptions {
   loadCodexCatalog?: typeof loadCodexModels
   codexExecutable?: string
+  claudeExecutable?:string
   environment?: Record<string, string>
   preCommandsAvailable?: () => Promise<boolean>
   fetch?: typeof globalThis.fetch
@@ -110,6 +111,7 @@ export class RuntimeCatalog {
             prompt: source,
             options: {
               cwd: root,
+              pathToClaudeCodeExecutable:this.options.claudeExecutable,
               abortController: controller,
               settingSources: [],
               persistSession: false,

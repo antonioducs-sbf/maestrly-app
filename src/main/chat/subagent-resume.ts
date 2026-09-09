@@ -71,11 +71,13 @@ export function claudeSubagentRuntimeSignature(input: {
   sentEffort: string | null
   fastMode: boolean
   toolNames: readonly string[]
+  accountIdentity?: { fingerprint: string | null; epoch: number }
 }): string {
   return createHash('sha256')
     .update(
       JSON.stringify({
         version: 1,
+        ...(input.accountIdentity ? { accountIdentity: input.accountIdentity } : {}),
         modelId: input.modelId,
         behaviorProfileId: input.behaviorProfileId,
         prompt: input.prompt,

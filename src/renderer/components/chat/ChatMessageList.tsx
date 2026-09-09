@@ -1,3 +1,4 @@
+import { subscriptionExhaustionMessageKey } from './subscription-failover-route'
 import {
   memo,
   useCallback,
@@ -820,7 +821,7 @@ const Bubble = memo(function Bubble({
         <div
           role={
             message.errorCode === 'claude-authentication-required' ||
-            message.errorCode === 'codex-accounts-exhausted' ||
+            subscriptionExhaustionMessageKey(message.errorCode) ||
             message.errorCode === 'review-loop-process-interrupted'
               ? 'alert'
               : undefined
@@ -832,8 +833,8 @@ const Bubble = memo(function Bubble({
               ? t('chatgptWeb.reviewLoopProcessInterruptedError')
               : message.errorCode === 'claude-authentication-required'
                 ? t('messages.claudeAuthenticationRequired')
-                : message.errorCode === 'codex-accounts-exhausted'
-                  ? t('messages.accountsExhaustedError')
+                : subscriptionExhaustionMessageKey(message.errorCode)
+                  ? t(subscriptionExhaustionMessageKey(message.errorCode)!)
                   : message.error}
           </span>
           {message.errorCode === 'claude-authentication-required' && (

@@ -21,7 +21,7 @@ import { cn } from '@/lib/utils'
 import {
   addFallback,
   availableCandidates,
-  labelForCodexProvider,
+  labelForSubscriptionProvider,
   moveFallbackDown,
   moveFallbackUp,
   removeFallback,
@@ -599,15 +599,18 @@ function ProviderRow({
 
 function FailoverRouteEditor({
   primaryProviderId,
+  providerKind,
   config,
   onChanged,
 }: {
   primaryProviderId: string
+  providerKind: ChatSubscriptionProviderKind
   config: ChatConfig
   onChanged: () => void
 }) {
   const { t } = useTranslation('chat')
-  const defaultLabel = t('settings.codexSubscriptionHeading')
+  const prefix = subscriptionProviderCopy[providerKind].prefix
+  const defaultLabel = t(`settings.${prefix}Heading`)
   const initial = routeForPrimary(config.subscriptionFailover.routes, primaryProviderId)
   const [route, setRoute] = useState<ChatSubscriptionFailoverRoute>(initial)
   const [busy, setBusy] = useState(false)
@@ -666,7 +669,7 @@ function FailoverRouteEditor({
           {route.fallbackProviderIds.map((fallbackId, index) => {
             const provider = config.providers.find((entry) => entry.id === fallbackId)
             const connected = provider ? (provider.connected ?? provider.apiKeyPresent) : false
-            const label = labelForCodexProvider(fallbackId, config.providers, defaultLabel)
+            const label = labelForSubscriptionProvider(fallbackId, config.providers, defaultLabel)
             return (
               <div
                 key={fallbackId}
@@ -728,7 +731,7 @@ function FailoverRouteEditor({
               {candidates.map((candidate) => (
                 <option key={candidate.providerId} value={candidate.providerId}>
                   {candidate.label}
-                  {!candidate.connected ? ` (${t('settings.codexSubscriptionDisconnected')})` : ''}
+                  {!candidate.connected ? ` (${t(`settings.${prefix}Disconnected`)})` : ''}
                 </option>
               ))}
             </select>
@@ -747,7 +750,7 @@ function SubscriptionProviderCard({
   accountId = null,
   accountLabel,
   config,
-  showCodexFailover = false,
+  showSubscriptionFailover = false,
   onChanged,
   onModelFilterChanged,
 }: {
@@ -758,7 +761,7 @@ function SubscriptionProviderCard({
   accountLabel?: string
   config?: ChatConfig
 
-  showCodexFailover?: boolean
+  showSubscriptionFailover?: boolean
   onChanged: () => void
   onModelFilterChanged: () => void
 }) {
@@ -1183,9 +1186,12 @@ function SubscriptionProviderCard({
       </div>
       {signedIn && usageSupported && <SubscriptionUsagePanel usage={usage} loading={usageBusy} />}
       {provider && signedIn && <ProviderModelFilter providerId={provider.id} onFilterChanged={onModelFilterChanged} />}
-      {showCodexFailover && config && (
+      {showSubscriptionFailover && config && (
         <FailoverRouteEditor
-          primaryProviderId={provider?.id ?? withSubscriptionAccount('builtin_codex_subscription', accountId ?? null)}
+          providerKind={providerKind}
+          primaryProviderId={
+            provider?.id ?? withSubscriptionAccount(`builtin_${providerKind.replaceAll('-', '_')}`, accountId ?? null)
+          }
           config={config}
           onChanged={onChanged}
         />
@@ -1393,8 +1399,9 @@ function AccountsSettingsPanel({
     (provider) => isChatSubscriptionProviderKind(provider.kind) && provider.accountId
   )
   const customProviders = config.providers.filter((provider) => !isChatSubscriptionProviderKind(provider.kind))
-  const codexAccountCount = config.providers.filter((provider) => provider.kind === 'codex-subscription').length
-  const showCodexFailover = codexAccountCount > 1
+  const showSubscriptionFailover = (kind: ChatSubscriptionProviderKind) =>
+    config.subscriptionFailover.supportedKinds.includes(kind) &&
+    config.providers.filter((provider) => provider.kind === kind).length > 1
 
   return (
     <div className="flex flex-col gap-3">
@@ -1404,7 +1411,7 @@ function AccountsSettingsPanel({
             providerKind={providerKind}
             provider={subscriptionProviders.get(providerKind)}
             config={config}
-            showCodexFailover={showCodexFailover && providerKind === 'codex-subscription'}
+            showSubscriptionFailover={showSubscriptionFailover(providerKind)}
             onChanged={onChanged}
             onModelFilterChanged={onModelFilterChanged}
           />
@@ -1418,7 +1425,7 @@ function AccountsSettingsPanel({
                 accountId={provider.accountId ?? null}
                 accountLabel={provider.accountLabel}
                 config={config}
-                showCodexFailover={showCodexFailover && providerKind === 'codex-subscription'}
+                showSubscriptionFailover={showSubscriptionFailover(providerKind)}
                 onChanged={onChanged}
                 onModelFilterChanged={onModelFilterChanged}
               />

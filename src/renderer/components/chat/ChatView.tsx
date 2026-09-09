@@ -1,6 +1,11 @@
 /** Conversation host for provider streams, queued turns, draft attachments, and paginated history.
  * Bound hidden rendering work while preserving session state and reconciling on visibility changes. */
 import {
+  labelForSubscriptionProvider,
+  subscriptionDefaultLabelKey,
+  subscriptionExhaustionMessageKey,
+} from './subscription-failover-route'
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -607,8 +612,8 @@ export function ChatView({
           ? t('view.errNoProvider')
           : error === 'account-pending-deletion'
             ? t('view.errAccountDeleting')
-            : error === 'codex-accounts-exhausted'
-              ? t('messages.accountsExhaustedError')
+            : subscriptionExhaustionMessageKey(error)
+              ? t(subscriptionExhaustionMessageKey(error)!)
               : error === 'review-loop-active'
                 ? t('view.errReviewLoopActive')
                 : error === 'context-overflow'
@@ -942,13 +947,8 @@ export function ChatView({
 
   useEffect(() => {
     setFailoverNotice(null)
-    const defaultLabel = t('settings.codexSubscriptionHeading')
-    const labelFor = (providerId: string): string => {
-      const provider = chatProviders.find((entry) => entry.id === providerId)
-      if (!provider) return providerId
-      if (provider.accountId) return provider.accountLabel?.trim() || provider.accountId
-      return defaultLabel
-    }
+    const labelFor = (providerId: string): string =>
+      labelForSubscriptionProvider(providerId, chatProviders, t(subscriptionDefaultLabelKey(providerId)))
     return window.api.onChatSubscriptionFailover(conversationId, (ev: ChatSubscriptionFailoverEvent) => {
       setFailoverNotice(
         t('settings.failoverSwitchStatus', {

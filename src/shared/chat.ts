@@ -978,6 +978,7 @@ export function mergePendingChatQuestions(
 export type ChatErrorCode =
   | 'claude-authentication-required'
   | 'codex-accounts-exhausted'
+  | 'claude-accounts-exhausted'
   | 'review-loop-process-interrupted'
 
 export type ChatStreamEvent =
@@ -1387,6 +1388,13 @@ export function subscriptionBaseProviderId(providerId: string): string {
   return idx > 0 ? providerId.slice(0, idx) : providerId
 }
 
+/** Provider families supported by ordered subscription account failover. */
+export function isSubscriptionFailoverProviderId(providerId: string | null | undefined): boolean {
+  if (!providerId) return false
+  const base = subscriptionBaseProviderId(providerId)
+  return base === 'builtin_codex_subscription' || base === 'builtin_claude_subscription'
+}
+
 /** Stable provider-family identities. Credentials and account labels always stay local. */
 export const PORTABLE_EXECUTION_BUILTIN_PROVIDER_IDS = [
   'builtin_codex_subscription',
@@ -1585,7 +1593,7 @@ export interface ChatConfig {
   defaultFastMode?: boolean
 
   imageInterpreter: ChatImageInterpreter | null
-  /** Failover between subscription accounts (currently Codex). */
+  /** Failover between Claude or Codex subscription accounts. */
   subscriptionFailover: {
     supportedKinds: ChatSubscriptionProviderKind[]
     routes: ChatSubscriptionFailoverRoute[]

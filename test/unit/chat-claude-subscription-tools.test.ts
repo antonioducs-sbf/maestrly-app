@@ -422,3 +422,100 @@ describe('Claude in-process MCP bridge', () => {
     )
   })
 })
+
+describe('journaled Claude bridge', () => {
+  async function setup(execute: (...args: any[]) => Promise<any>, toModelOutput?: any) {
+    const { createClaudeToolJournal } = await import('../../src/main/chat/claude-agent-sdk/tool-journal')
+    const host = new AbortController()
+    const journal = createClaudeToolJournal({ attemptId: 'attempt' })
+    const bridge = await buildClaudeToolBridge(
+      {
+        write: tool({
+          inputSchema: jsonSchema({ type: 'object', properties: {} }),
+          execute,
+          toModelOutput,
+        }),
+      },
+      host.signal,
+      undefined,
+      undefined,
+      journal
+    )
+    const handler = (bridge.server.instance as any)._registeredTools.write.handler
+    const hook = (id: string, input = {}) =>
+      bridge.preToolUseHook.hooks[0](
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'mcp__maestrly__write',
+          tool_input: input,
+          tool_use_id: id,
+        } as never,
+        id,
+        { signal: host.signal }
+      )
+    return { host, journal, bridge, handler, hook }
+  }
+
+  it('retains canonical images before SDK projection fails and retries without repeating the effect', async () => {
+    const output = mcpResultToChatToolOutput({ content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }] })
+    const execute = vi.fn(async () => output)
+    const state = await setup(execute, () => {
+      expect(state.journal.snapshot()[0].state).toBe('completed')
+      throw new Error('SDK projection failed')
+    })
+    await state.hook('image')
+    await expect(state.handler({}, {})).rejects.toThrow('SDK projection failed')
+    expect(toolOutputImages(state.journal.snapshot()[0].output)).toHaveLength(1)
+    await state.hook('image')
+    await expect(state.handler({}, {})).rejects.toThrow('SDK projection failed')
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves distinct IDs with equal input and rejects conflicting verified input', async () => {
+    const execute = vi.fn(async (_input: unknown, _options: { toolCallId: string }) => 'done')
+    const { hook, handler } = await setup(execute)
+    await hook('one')
+    await hook('one')
+    await hook('two')
+    await Promise.all([handler({}, {}), handler({}, {})])
+    expect(execute.mock.calls.map((call) => call[1].toolCallId)).toEqual(['one', 'two'])
+    await expect(hook('one', { changed: true })).rejects.toThrow('Conflicting')
+  })
+
+  it('accepts callbacks before their verified hooks, including same-ID retries', async () => {
+    const execute = vi.fn(async () => 'done')
+    const { hook, handler } = await setup(execute)
+    const first = handler({}, {})
+    await Promise.resolve()
+    await hook('late')
+    await first
+    const retry = handler({}, {})
+    await Promise.resolve()
+    await hook('late')
+    await expect(retry).resolves.toBeDefined()
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores SDK disconnect while preserving explicit host cancellation', async () => {
+    let executionSignal!: AbortSignal
+    let finish!: () => void
+    const { host, hook, handler, journal } = await setup(async (_input, options) => {
+      executionSignal = options.abortSignal
+      await new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      return 'effect done'
+    })
+    await hook('one')
+    const sdk = new AbortController()
+    sdk.abort()
+    const pending = handler({}, { signal: sdk.signal })
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    expect(executionSignal.aborted).toBe(false)
+    host.abort()
+    expect(executionSignal.aborted).toBe(true)
+    finish()
+    await pending
+    expect(journal.snapshot()[0].output).toBe('effect done')
+  })
+})

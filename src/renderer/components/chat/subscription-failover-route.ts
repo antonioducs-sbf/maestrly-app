@@ -1,11 +1,5 @@
 import type { ChatProviderInfo, ChatSubscriptionFailoverRoute } from '../../../shared/chat'
-import { subscriptionBaseProviderId } from '../../../shared/chat'
-
-const CODEX_BASE = 'builtin_codex_subscription'
-
-function isCodexProviderId(providerId: string): boolean {
-  return subscriptionBaseProviderId(providerId) === CODEX_BASE
-}
+import { isSubscriptionFailoverProviderId, subscriptionBaseProviderId } from '../../../shared/chat'
 
 /** Candidate account for a failover dropdown (excludes self / duplicates / other providers). */
 export interface FailoverRouteCandidate {
@@ -35,13 +29,15 @@ export function availableCandidates(args: {
   providers: readonly ChatProviderInfo[]
   defaultLabel: string
 }): FailoverRouteCandidate[] {
+  if (!isSubscriptionFailoverProviderId(args.primaryProviderId)) return []
   const base = subscriptionBaseProviderId(args.primaryProviderId)
   const excluded = new Set<string>([args.primaryProviderId, ...args.fallbackProviderIds])
   const out: FailoverRouteCandidate[] = []
   for (const provider of args.providers) {
-    if (provider.kind !== 'codex-subscription' && !isCodexProviderId(provider.id)) continue
+    if (!isSubscriptionFailoverProviderId(provider.id)) continue
     if (subscriptionBaseProviderId(provider.id) !== base) continue
     if (excluded.has(provider.id)) continue
+    excluded.add(provider.id)
     out.push({
       providerId: provider.id,
       label: provider.accountId ? provider.accountLabel?.trim() || provider.accountId : args.defaultLabel,
@@ -57,7 +53,7 @@ export function addFallback(
 ): ChatSubscriptionFailoverRoute {
   const id = fallbackProviderId.trim()
   if (!id || id === route.primaryProviderId) return route
-  if (!isCodexProviderId(id)) return route
+  if (!isSubscriptionFailoverProviderId(id)) return route
   if (subscriptionBaseProviderId(id) !== subscriptionBaseProviderId(route.primaryProviderId)) return route
   if (route.fallbackProviderIds.includes(id)) return route
   return { ...route, fallbackProviderIds: [...route.fallbackProviderIds, id] }
@@ -91,8 +87,8 @@ export function withEnabled(route: ChatSubscriptionFailoverRoute, enabled: boole
   return { ...route, enabled }
 }
 
-/** Display label for a Codex provider id given the chat config providers list. */
-export function labelForCodexProvider(
+/** Display label for a subscription provider id given the chat config providers list. */
+export function labelForSubscriptionProvider(
   providerId: string,
   providers: readonly ChatProviderInfo[],
   defaultLabel: string
@@ -101,4 +97,17 @@ export function labelForCodexProvider(
   if (!provider) return providerId
   if (provider.accountId) return provider.accountLabel?.trim() || provider.accountId
   return defaultLabel
+}
+
+/** Shared by admission failures and persisted message errors. */
+export function subscriptionExhaustionMessageKey(errorCode?: string) {
+  if (errorCode === 'codex-accounts-exhausted') return 'messages.accountsExhaustedError' as const
+  if (errorCode === 'claude-accounts-exhausted') return 'messages.claudeAccountsExhaustedError' as const
+  return undefined
+}
+
+export function subscriptionDefaultLabelKey(providerId: string) {
+  return subscriptionBaseProviderId(providerId) === 'builtin_claude_subscription'
+    ? ('settings.claudeSubscriptionHeading' as const)
+    : ('settings.codexSubscriptionHeading' as const)
 }

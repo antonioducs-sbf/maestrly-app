@@ -230,7 +230,8 @@ test('direct Chat: the dialog transfers Git, notes, and ignored files and comple
     expect(await win.evaluate(() => window.api.listConversationMigrationRecoveries())).toEqual([])
   } finally {
     if (app) await app.close().catch(() => {})
-    rmSync(root, { recursive: true, force: true })
+    // Electron helpers may briefly finish writing the profile after app.close().
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 
@@ -284,6 +285,7 @@ test('direct Chat: new work at the destination does not reopen recovery after re
     expect(git(repo, ['stash', 'list'])).toBe('')
   } finally {
     if (app) await app.close().catch(() => {})
-    rmSync(root, { recursive: true, force: true })
+    // Electron helpers may briefly finish writing the profile after app.close().
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })

@@ -33,9 +33,9 @@ OAuth and visual companion surfaces use stricter isolated sessions. See the
 | --- | --- | --- |
 | `src/renderer/` | React renderer | Presentation, local drafts, navigation, and user intent |
 | `src/preload/` | Preload bridge | Named typed operations and event subscriptions |
-| `src/main/` | Main process | IPC validation, lifecycle, SQLite, filesystem, processes, providers, permissions, and browser sessions |
+| `apps/desktop/src/main/` | Main process | IPC validation, lifecycle, SQLite, filesystem, processes, providers, permissions, and browser sessions |
 | `src/shared/` | Pure shared code | Types, schemas, i18n catalogs, domain rules, and serialization contracts |
-| `runtime-assets/` | Package/runtime tooling | Optional Local ML runtime manifests, archives, and model preparation |
+| `apps/desktop/runtime-assets/` | Package/runtime tooling | Optional Local ML runtime manifests, archives, and model preparation |
 | `resources/` | Packaged assets | Icons, sounds, notices, and target-specific staged resources |
 
 Shared modules must not import Electron, React, or Node-only APIs. Renderer code

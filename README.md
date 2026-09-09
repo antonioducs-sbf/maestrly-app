@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="resources/icon.png" width="112" alt="Maestrly App icon">
+  <img src="apps/desktop/resources/icon.png" width="112" alt="Maestrly App icon">
 </p>
 
-<h1 align="center">Maestrly App</h1>
+<h1 align="center">Maestrly</h1>
 
 <p align="center">
-  A local-first AI workspace for conversations, orchestration, projects, and developer tools.
+  Local-first desktop tools plus a self-hosted work platform with accountable agent execution.
 </p>
 
 <p align="center">
@@ -22,6 +22,19 @@ embedded editor and browser, notes, and project memory
 into one desktop. Application state stays on the local machine. A Maestrly
 account, license server, hosted backend, telemetry endpoint, and mandatory
 updater are not required.
+
+The repository is also a modular platform with four independently buildable products:
+
+| Product | Purpose |
+| --- | --- |
+| `apps/desktop` | Existing local-first Electron workspace; platform connection is optional |
+| `apps/web` | Browser board, automations, approvals, executions, runners, and reports |
+| `apps/server` | Versioned API, Better Auth, PostgreSQL persistence, RLS, audit, and durable job claims |
+| `apps/runner` | Headless Node runner with leases, recovery, Codex, and Claude Agent adapters |
+
+Focused public contracts live in `packages/protocol`, `packages/client-sdk`, and
+`packages/runner-core`; there is no generic shared package. See
+[self-hosting](docs/self-hosting.md) and [platform security](docs/platform-security.md).
 
 > [!IMPORTANT]
 > This project is a `0.x` source preview. Official binaries, when available,
@@ -79,6 +92,9 @@ npm run hooks:install
 npm run dev
 ```
 
+The traditional `npm run dev` command still opens the desktop. Platform commands
+are explicit: `npm run dev:web`, `npm run dev:server`, and `npm run dev:runner`.
+
 Development uses an isolated `maestrly-app-dev-<instance>` profile. Production,
 beta, and development profiles are separate, and each running channel opens only
 its own profile. Repositories and worktrees remain in their existing filesystem
@@ -108,6 +124,9 @@ enabling external tools.
 ```sh
 npm run check
 npm run test:e2e
+npm run test:integration
+npm run test:e2e:platform
+npm run smoke:platform
 npm run audit:dependencies
 ```
 
@@ -128,6 +147,11 @@ because it consults the live npm advisory service.
 - [Changelog](CHANGELOG.md)
 - [Support](SUPPORT.md)
 - [Local data and recovery](docs/local-data.md)
+- [Self-hosting](docs/self-hosting.md)
+- [Runner operations](docs/runner-operations.md)
+- [Platform protocol](docs/platform-protocol.md)
+- [Platform security](docs/platform-security.md)
+- [Backup and restore](docs/backup-restore.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Contributing
@@ -142,3 +166,5 @@ vulnerabilities only through the confidential process in [SECURITY.md](SECURITY.
 Maestrly App source is licensed under the [MIT License](LICENSE). Dependencies,
 SDKs, downloadable runtimes, models, and derived code retain their own licenses
 or service terms; see [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+For board management, Markdown card details and Git/runner setup, see [Kanban workflows](docs/kanban-workflows.md).

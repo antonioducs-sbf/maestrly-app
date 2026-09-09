@@ -56,15 +56,15 @@ development data.
 
 | Path | Purpose |
 | --- | --- |
-| `src/main/` | Privileged Electron services, IPC, storage, processes, providers, and windows |
+| `apps/desktop/src/main/` | Privileged Electron services, IPC, storage, processes, providers, and windows |
 | `src/preload/` | Typed renderer bridge |
 | `src/renderer/` | React desktop and styles |
 | `src/shared/` | Pure types, schemas, domain rules, and i18n |
-| `test/unit/` | Vitest behavior and contract tests |
-| `test/e2e/` | Real Electron integration tests |
+| `apps/desktop/test/unit/` | Vitest behavior and contract tests |
+| `apps/desktop/test/e2e/` | Real Electron integration tests |
 | `tests/policy/` | Node tests for repository and product boundaries |
 | `scripts/` | Development, runtime, package, audit, and verification tools |
-| `runtime-assets/` | Optional Local ML build inputs, manifests, and ignored archives |
+| `apps/desktop/runtime-assets/` | Optional Local ML build inputs, manifests, and ignored archives |
 | `resources/` | Packaged icons, sounds, notices, and staged optional tools |
 | `config/` | Versioned limits and reviewed policy exceptions |
 
@@ -150,7 +150,7 @@ Without one, the provider remains visible but unavailable; no account-specific
 identifier is embedded in the source tree.
 
 For Local ML archive and model preparation, read
-[runtime-assets/local-ml/README.md](../runtime-assets/local-ml/README.md). Keep
+[apps/desktop/runtime-assets/local-ml/README.md](../apps/desktop/runtime-assets/local-ml/README.md). Keep
 downloaded archives and model caches out of Git.
 
 ## Packaging

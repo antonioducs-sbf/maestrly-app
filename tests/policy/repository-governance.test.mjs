@@ -114,22 +114,22 @@ test('contribution policy preserves truthful authorship and standard commit meta
 })
 
 test('packages include synchronized project and runtime license notices', () => {
-  const builder = read('electron-builder.yml')
-  assert.match(builder, /- from: LICENSE\n\s+to: LICENSE\.txt/)
-  assert.match(builder, /- from: THIRD_PARTY_NOTICES\.md\n\s+to: THIRD_PARTY_NOTICES\.md/)
+  const builder = read('apps/desktop/electron-builder.yml')
+  assert.match(builder, /- from: \.\.\/\.\.\/LICENSE\n\s+to: LICENSE\.txt/)
+  assert.match(builder, /- from: \.\.\/\.\.\/THIRD_PARTY_NOTICES\.md\n\s+to: THIRD_PARTY_NOTICES\.md/)
 
-  const manifest = JSON.parse(read('package.json'))
+  const manifest = JSON.parse(read('apps/desktop/package.json'))
   const notices = read('THIRD_PARTY_NOTICES.md')
-  const codexNotice = read('resources/licenses/openai-codex-runtime-NOTICE.txt')
+  const codexNotice = read('apps/desktop/resources/licenses/openai-codex-runtime-NOTICE.txt')
   assert.ok(notices.includes('`@openai/codex` ' + manifest.devDependencies['@openai/codex']))
   assert.ok(codexNotice.includes('Version: ' + manifest.devDependencies['@openai/codex']))
 })
 
 test('dependency policy covers the packaged local ML closure', () => {
   const manifest = JSON.parse(read('package.json'))
-  assert.match(manifest.scripts['audit:dependencies'], /--prefix runtime-assets\/local-ml/)
+  assert.match(manifest.scripts['audit:dependencies'], /--prefix apps\/desktop\/runtime-assets\/local-ml/)
 
-  const runtimeManifest = JSON.parse(read('runtime-assets/local-ml/package.json'))
+  const runtimeManifest = JSON.parse(read('apps/desktop/runtime-assets/local-ml/package.json'))
   assert.equal(runtimeManifest.overrides.sharp, '0.35.4')
 })
 

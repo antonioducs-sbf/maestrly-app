@@ -24,7 +24,7 @@ legal notices, and size budgets. Run packaging jobs in separate checkouts:
 staging and native dependency installation mutate shared build directories.
 
 Local ML must be built on a supported target host (macOS arm64 to Windows x64 is
-the one supported cross-build). See [the runtime guide](../runtime-assets/local-ml/README.md)
+the one supported cross-build). See [the runtime guide](../apps/desktop/runtime-assets/local-ml/README.md)
 for model-cache preparation and offline installation.
 
 The default macOS package is an ad-hoc signed `.app`; Windows uses a per-user NSIS

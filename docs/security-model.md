@@ -87,7 +87,7 @@ appropriately protected user account for sensitive conversations and source.
 ## Credentials
 
 Application-managed API keys and integration credentials remain in the main
-process. `src/main/secure-store.ts` stores only `enc:v1:` ciphertext produced by
+process. `apps/desktop/src/main/secure-store.ts` stores only `enc:v1:` ciphertext produced by
 Electron `safeStorage`. Reads ignore legacy plaintext, and writes return failure
 when OS encryption is unavailable instead of falling back to plaintext.
 

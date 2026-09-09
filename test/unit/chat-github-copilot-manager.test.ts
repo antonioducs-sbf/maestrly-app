@@ -86,7 +86,7 @@ describe('GitHubCopilotSubscriptionManager', () => {
   let tokenStore: MemoryTokenStore
   let client: GitHubCopilotRuntimeClient
   let clientOptions: CopilotClientOptions[]
-  let releaseRuntimeLease: ReturnType<typeof vi.fn>
+  let releaseRuntimeLease: ReturnType<typeof vi.fn<() => void>>
   let manager: GitHubCopilotSubscriptionManager
 
   beforeEach(() => {

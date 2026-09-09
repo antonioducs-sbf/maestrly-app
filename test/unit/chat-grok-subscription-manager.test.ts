@@ -479,7 +479,7 @@ describe('GrokSubscriptionManager', () => {
     let loginCalls = 0
     const listeners: Array<{
       waitForCallback: () => Promise<never>
-      close: ReturnType<typeof vi.fn>
+      close: ReturnType<typeof vi.fn<() => Promise<void>>>
     }> = []
     const { manager } = makeManager({
       store,

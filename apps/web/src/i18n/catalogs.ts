@@ -656,7 +656,12 @@ export const en = {
   "Execution conversation": "Execution conversation",
   "Task": "Task",
   "Conversation messages will appear here when the desktop executor starts.": "Conversation messages will appear here when the desktop executor starts.",
-  "Connect provider accounts and select them in the desktop executor settings.": "Connect provider accounts and select them in the desktop executor settings."
+  "Connect provider accounts and select them in the desktop executor settings.": "Connect provider accounts and select them in the desktop executor settings.",
+  "Work": "Work",
+  "{count} open": "{count} open",
+  "{count} running now": "{count} running now",
+  "{count} waiting for you": "{count} waiting for you",
+  "Nothing waiting for you": "Nothing waiting for you"
 } as const
 export const ptBR: Record<keyof typeof en, string> = {
   "Work moves forward. You stay in control.": "O trabalho avança. Você mantém o controle.",
@@ -1316,5 +1321,10 @@ export const ptBR: Record<keyof typeof en, string> = {
   "Execution conversation": "Conversa da execução",
   "Task": "Tarefa",
   "Conversation messages will appear here when the desktop executor starts.": "As mensagens aparecerão aqui quando o executor Maestrly iniciar.",
-  "Connect provider accounts and select them in the desktop executor settings.": "Conecte as contas dos provedores e selecione-as nas configurações do executor Maestrly."
+  "Connect provider accounts and select them in the desktop executor settings.": "Conecte as contas dos provedores e selecione-as nas configurações do executor Maestrly.",
+  "Work": "Trabalho",
+  "{count} open": "{count} em aberto",
+  "{count} running now": "{count} rodando agora",
+  "{count} waiting for you": "{count} aguardando você",
+  "Nothing waiting for you": "Nada aguardando você"
 }

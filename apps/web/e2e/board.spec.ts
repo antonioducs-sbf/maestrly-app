@@ -23,11 +23,17 @@ test('creates and moves work with a keyboard-accessible alternative', async ({ p
     if (url.pathname.endsWith('/boards/board')) return route.fulfill({ json: { board, columns, cards: [moveBody ? { ...card, columnId: 'review', version: 2 } : card] } })
     if (url.pathname.endsWith('/cards/card')) return route.fulfill({ json: { card, comments: [], attachments: [], executions: [], artifacts: [] } })
     if (url.pathname.endsWith('/move')) { moveBody = route.request().postDataJSON(); return route.fulfill({ json: { card: { ...card, columnId: 'review', version: 2 }, jobId: 'job' } }) }
+    if (url.pathname.endsWith('/executions')) return route.fulfill({ json: [
+      { id:'j1', cardId:'card', cardTitle:'Verify release evidence', jobState:'active', runState:'running', approvalId:null, approvalStatus:null, informationRequestId:null, informationQuestion:null, createdAt: now },
+      { id:'j2', cardId:'card', cardTitle:'Verify release evidence', jobState:'waiting', runState:null, approvalId:'a', approvalStatus:'pending', informationRequestId:null, informationQuestion:null, createdAt: now },
+    ]})
     if (url.pathname.endsWith('/events')) return route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' })
     return route.fulfill({ status: 204, body: '' })
   })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: L('Board'), level:2 })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: L('{count} waiting for you').replace('{count}','1') })).toBeVisible()
+  await expect(page.locator('.board-pulse')).toContainText(L('{count} running now').replace('{count}','1'))
   await page.screenshot({ path: 'test-results/platform-board.png', fullPage: true })
   const other = testInfo.project.name === 'en' ? 'pt-BR' : 'en'
   await page.getByRole('combobox', { name: L('Language') }).click()

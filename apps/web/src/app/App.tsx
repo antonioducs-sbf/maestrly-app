@@ -14,7 +14,9 @@ import { Login } from '../features/auth/Login.js'
 import { DeviceApproval } from '../features/auth/DeviceApproval.js'
 import { Invitation } from '../features/auth/Invitation.js'
 import { ProjectSwitcher } from '../features/projects/ProjectSwitcher.js'
-import { BoardView, BoardSummary, type BoardSnapshot } from '../features/boards/BoardView.js'
+import { BoardView, type BoardSnapshot } from '../features/boards/BoardView.js'
+import { BoardPulse } from '../features/boards/BoardPulse.js'
+import type { Operation } from '../features/executions/types.js'
 import { AutomationPanel } from '../features/automations/AutomationPanel.js'
 import { RunnersPanel } from '../features/runners/RunnersPanel.js'
 import { OperationsPanel } from '../features/executions/OperationsPanel.js'
@@ -30,16 +32,12 @@ interface Organization {
 }
 type View = 'board' | 'automations' | 'runners' | 'executions' | 'reports' | 'repositories' | 'team' | 'devices'
 
-const nav: Array<{ id: View; label: string; icon: typeof Columns3 }> = [
-  { id: 'board', label: 'Board', icon: Columns3 },
-  { id: 'automations', label: 'Automations', icon: Bot },
-  { id: 'team', label: 'Team', icon: Users },
-  { id: 'devices', label: 'My computers', icon: Monitor },
-  { id: 'runners', label: 'Runners', icon: Cpu },
-  { id: 'executions', label: 'Executions', icon: Activity },
-  { id: 'reports', label: 'Reports', icon: BarChart3 },
-  { id: 'repositories', label: 'Git repositories', icon: GitBranch },
+const navGroups: Array<{ caption: string; items: Array<{ id: View; label: string; icon: typeof Columns3 }> }> = [
+  { caption: 'Work', items: [ { id: 'board', label: 'Board', icon: Columns3 }, { id: 'executions', label: 'Executions', icon: Activity } ] },
+  { caption: 'Automation', items: [ { id: 'automations', label: 'Automations', icon: Bot }, { id: 'runners', label: 'Runners', icon: Cpu }, { id: 'devices', label: 'My computers', icon: Monitor } ] },
+  { caption: 'Project settings', items: [ { id: 'team', label: 'Team', icon: Users }, { id: 'repositories', label: 'Git repositories', icon: GitBranch }, { id: 'reports', label: 'Reports', icon: BarChart3 } ] },
 ]
+const nav = navGroups.flatMap((group) => group.items)
 
 export function App() {
   useLocale()
@@ -117,6 +115,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
   const [boardId, setBoardId] = useState('')
   const [loadError, setLoadError] = useState('')
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null)
+  const [executions, setExecutions] = useState<Operation[]>([])
   const [view, setView] = useState<View>('board')
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (localStorage.getItem('maestrly-theme') as 'light' | 'dark') ?? 'light'
@@ -193,7 +192,10 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
       return
     }
     const request = ++boardRequest.current
-    const data = await api<BoardSnapshot>(`/api/v1/organizations/${organizationId}/boards/${boardId}`)
+    const [data, ledger] = await Promise.all([
+      api<BoardSnapshot>(`/api/v1/organizations/${organizationId}/boards/${boardId}`),
+      api<Operation[]>(`/api/v1/organizations/${organizationId}/projects/${projectId}/executions`).catch(() => [] as Operation[]),
+    ])
     if (
       request !== boardRequest.current ||
       currentScope.current.projectId !== projectId ||
@@ -201,6 +203,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
     )
       return
     setSnapshot(data)
+    setExecutions(Array.isArray(ledger) ? ledger : [])
     setLoadError('')
     setBoards((current) => current.map((b) => (b.id === data.board.id ? data.board : b)))
   }, [organizationId, projectId, boardId])
@@ -347,9 +350,10 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           ) : null}
           <p className="project-scope-note" id="project-scope-note">{t('Navigation below belongs to this project.')}</p>
         </div>
-        <p className="nav-caption project-nav-caption">{t('In this project')}</p>
         <nav aria-label={t('Workspace')} aria-describedby="project-scope-note">
-          {nav.map((item) => (
+          {navGroups.map((group) => [
+            <p key={group.caption} className="nav-caption">{t(group.caption)}</p>,
+            ...group.items.map((item) => (
             <button
               key={item.id}
               disabled={!projectId}
@@ -365,7 +369,8 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
               <item.icon />
               <span>{t(item.label)}</span>
             </button>
-          ))}
+            )),
+          ])}
         </nav>
         <div className="rail-bottom">
           <button className="sidebar-user sidebar-account" onClick={()=>{setPasswordChanged(false);setAccountOpen(true)}} aria-label={t('My account')} data-sidebar-tooltip={collapsed?t('My account'):undefined}>
@@ -390,48 +395,22 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
       </aside>
       <main className="workspace-main">
         {passwordChanged?<p className="form-note account-notice" role="status">{t('Password changed successfully.')}</p>:null}
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">
-              {organizations.find((item) => item.id === organizationId)?.name ?? t('Your organization')}
+        <header className="workspace-header">
+          <div className="workspace-title">
+            <p className="page-project-context">
+              {organizations.find((item) => item.id === organizationId)?.name ?? t('Your organization')} · <strong>{activeProject?.name ?? '—'}</strong>
             </p>
-            {projects.length ? (
-              <span className="breadcrumb-project" title={activeProject?.name}><span className="scope-label">{t('Project')}:</span> <strong>{activeProject?.name}</strong></span>
-            ) : (
-              <button className="primary" onClick={() => setCreatingProject(true)}>
-                {t('Create first project')}
-              </button>
-            )}
-          </div>
-          <div className="topbar-status">
-            <span className={streamState}>
-              <i />
-              {streamState === 'live' ? t('Live') : t('Reconnecting')}
-            </span>
-            <div className="avatar" title={session.user.email}>
-              {session.user.name.slice(0, 2).toUpperCase()}
-            </div>
-          </div>
-        </header>
-        {view==='board' && snapshot && snapshot.board.id===boardId ? <div className="board-summary-top"><BoardSummary snapshot={snapshot}/></div> : null}
-        <div className="view-heading">
-          <div>
-            <p className="page-project-context">{t('Project')}: <strong>{activeProject?.name ?? '—'}</strong></p>
             <h1>
               {view === 'board'
                 ? (activeProject?.name ?? t('Board'))
                 : t(nav.find((item) => item.id === view)?.label ?? '')}
             </h1>
-            <span className="view-subtitle" role="heading" aria-level={2}>
-              {view === 'board' ? t('Board') : ''}
-            </span>
+            {view === 'board' ? (
+              <span className="view-subtitle" role="heading" aria-level={2}>
+                {t('Board')}
+              </span>
+            ) : null}
           </div>
-          {view === 'board' ? (
-            <p>{t('Move work deliberately. Automation starts only on a real column entry.')}</p>
-          ) : null}
-        </div>
-        <div className="view-content">
-          {loadError ? <p role="alert">{t(loadError)}</p> : null}
           {projectId && view === 'board' ? (
             <BoardTabs
               boards={boards}
@@ -443,6 +422,18 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
               onReload={reloadBoards}
             />
           ) : null}
+          <div className="topbar-status">
+            <span className={streamState}>
+              <i />
+              {streamState === 'live' ? t('Live') : t('Reconnecting')}
+            </span>
+          </div>
+        </header>
+        {view === 'board' && snapshot && snapshot.board.id === boardId ? (
+          <BoardPulse snapshot={snapshot} executions={executions} />
+        ) : null}
+        <div className="view-content">
+          {loadError ? <p role="alert">{t(loadError)}</p> : null}
           {!organizationId ? (
             <div className="empty">
               <h2>{t('No organization access')}</h2>
@@ -454,7 +445,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
               <h2>{t('No projects yet')}</h2>
               <p>{t('Create a project to start a delivery board.')}</p>
               <button className="primary" onClick={() => setCreatingProject(true)}>
-                {t('Create project')}
+                {t('Create first project')}
               </button>
             </div>
           ) : null}

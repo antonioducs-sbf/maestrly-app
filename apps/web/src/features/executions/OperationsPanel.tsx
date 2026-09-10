@@ -3,8 +3,7 @@ import { FormDialog } from '../../components/FormDialog.js'
 import { useEffect, useState } from 'react'
 import { Activity, Check, X } from 'lucide-react'
 import { api, write } from '../../app/api.js'
-
-interface Operation { id: string; cardTitle: string; jobState: string; runState: string | null; approvalId: string | null; approvalStatus: string | null; informationRequestId: string | null; informationQuestion: string | null; createdAt: string }
+import type { Operation } from './types.js'
 
 export function OperationsPanel({ organizationId, projectId }: { organizationId: string; projectId: string }) {
   useLocale()

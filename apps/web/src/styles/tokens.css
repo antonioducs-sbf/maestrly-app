@@ -19,6 +19,8 @@
     --rail-line: #262927;
     --rail-hover: #1e211f;
     --rail-active: #262924;
+    --rail-raised: #1b1d1b;
+    --rail-brass: #d4b273;
     --shadow-card: 0 1px 0 rgb(31 32 30 / 4%), 0 6px 18px rgb(31 32 30 / 6%);
     --shadow-pop: 0 18px 48px rgb(0 0 0 / 18%);
     --font-display: "Bricolage Grotesque Variable", -apple-system, sans-serif;

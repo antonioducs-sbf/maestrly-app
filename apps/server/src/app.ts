@@ -234,7 +234,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     return inTenantTransaction(pool, { ...params, actor: { type: 'human', userId: human.userId } }, async (client) => {
       await authorizeProject(client, params.organizationId, params.projectId, human.userId, 'project:read')
       const result = await client.query(`
-        select j.id, c.title as "cardTitle", j.state as "jobState", r.state as "runState",
+        select j.id, j.card_id as "cardId", c.title as "cardTitle", j.state as "jobState", r.state as "runState",
           a.id as "approvalId", a.status as "approvalStatus", i.id as "informationRequestId",
           i.question as "informationQuestion", j.created_at as "createdAt"
         from jobs j join cards c on c.id = j.card_id

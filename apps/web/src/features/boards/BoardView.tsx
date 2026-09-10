@@ -2,7 +2,7 @@ import { PersonalExecutionDialog } from '../devices/PersonalExecutionDialog.js'
 import { AutomationEditor } from '../automations/AutomationEditor.js'
 import { BoardAutomationSettings } from '../automations/BoardAutomationSettings.js'
 import { useMemo, useState } from 'react'
-import { Bot, CircleDot, Plus, Search, Columns3, List, Sparkles, Settings2, LockKeyhole, ArrowUp, ArrowDown } from 'lucide-react'
+import { Bot, CircleDot, Plus, Search, Columns3, List, Settings2, LockKeyhole, ArrowUp, ArrowDown } from 'lucide-react'
 import type { Board, BoardColumn, Card } from '@maestrly/protocol'
 import { t, useLocale, number, errorText } from '../../i18n/index.js'
 import { write } from '../../app/api.js'
@@ -320,25 +320,3 @@ export function BoardView({
   )
 }
 
-export function BoardSummary({snapshot}:{snapshot:BoardSnapshot}) {
-  useLocale()
-  return (<section className="activity-banner">
-        <div className="activity-orb">
-          <Sparkles />
-        </div>
-        <div>
-          <strong>{t('Work moves forward. You stay in control.')}</strong>
-          <p>{t('Review evidence before authorizing the next step.')}</p>
-        </div>
-        <div className="board-metrics">
-          <div>
-            <b>{number(snapshot.cards.filter((c) => !c.parentCardId).length)}</b>
-            <span>{t('Open cards')}</span>
-          </div>
-          <div>
-            <b>{number(snapshot.columns.filter((c) => c.executionPolicyId).length)}</b>
-            <span>{t('Automations')}</span>
-          </div>
-        </div>
-      </section>)
-}

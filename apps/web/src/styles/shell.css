@@ -35,8 +35,10 @@
   .workspace-brand .brand-symbol { display: block; width: 28px; height: 28px; padding: 0; margin: 0; background: none; object-fit: contain; }
   .workspace-brand strong { font-family: var(--font-display); font-size: 20px; font-weight: 500; letter-spacing: -0.03em; color: var(--rail-ink); }
   .workspace-brand small { display: none; }
-  .rail .sidebar-toggle { display: grid; place-items: center; width: 30px; min-height: 30px; flex-shrink: 0; padding: 5px; margin: 0; border-radius: var(--radius-s); color: var(--rail-muted); cursor: pointer; }
-  .rail .sidebar-toggle:hover, .rail .sidebar-project-shortcut:hover, .rail .sidebar-language-shortcut:hover { background: var(--rail-hover); color: var(--rail-ink); }
+  /* The toggle is a quiet utility, not a nav item: hover only brightens the glyph, no box. */
+  .rail .sidebar-toggle { display: grid; place-items: center; width: 30px; min-height: 30px; flex-shrink: 0; padding: 5px; margin: 0; border-radius: var(--radius-s); color: #6f746d; cursor: pointer; transition: color var(--dur-fast); }
+  .rail .sidebar-toggle:hover { color: var(--rail-ink); }
+  .rail .sidebar-project-shortcut:hover, .rail .sidebar-language-shortcut:hover { background: var(--rail-hover); color: var(--rail-ink); }
   .rail .sidebar-project-shortcut { display: grid; place-items: center; width: 100%; min-height: 44px; margin-bottom: 12px; border-radius: var(--radius-s); color: var(--rail-brass); }
 
   .rail .sidebar-projects { margin: 0 0 6px; padding: 10px 10px 12px; border: 1px solid var(--rail-line); background: var(--rail-raised); border-radius: var(--radius-m); }

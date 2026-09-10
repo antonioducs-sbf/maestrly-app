@@ -336,8 +336,8 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           <strong>maestrly</strong>
           <small>WORK</small>
         </div>
-          <button type="button" className="sidebar-toggle" aria-label={t(collapsed?'Open sidebar':'Close sidebar')} data-sidebar-tooltip={t(collapsed?'Open sidebar':'Close sidebar')} aria-expanded={!collapsed} aria-controls="project-sidebar" onClick={()=>setSidebarOpen(collapsed)}>
-          {collapsed?<PanelLeftOpen size={21}/>:<PanelLeftClose size={21}/>}
+          <button type="button" className="sidebar-toggle" aria-label={t(collapsed?'Open sidebar':'Close sidebar')} title={collapsed?undefined:t('Close sidebar')} data-sidebar-tooltip={collapsed?t('Open sidebar'):undefined} aria-expanded={!collapsed} aria-controls="project-sidebar" onClick={()=>setSidebarOpen(collapsed)}>
+          {collapsed?<PanelLeftOpen size={18} strokeWidth={1.75}/>:<PanelLeftClose size={18} strokeWidth={1.75}/>}
         </button>
         </div>
         {collapsed?<button className="sidebar-project-shortcut" aria-label={t('Project')+': '+(activeProject?.name??'—')} data-sidebar-tooltip={t('Project')+': '+(activeProject?.name??'—')} onClick={()=>setSidebarOpen(true)}><FolderKanban size={20}/></button>:null}

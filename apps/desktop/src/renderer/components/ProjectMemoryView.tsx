@@ -1,3 +1,4 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -303,30 +304,30 @@ export function ProjectMemoryView({ workspaceId, workspaceName, onShowSidebar, o
                 className="h-8 min-w-0 flex-1 bg-transparent text-xs outline-none"
               />
             </label>
-            <select
+            <OptionSelect
               value={typeFilter}
-              onChange={(event) => setTypeFilter(event.target.value as MemoryType | '')}
-              className="h-8 rounded border border-white/[0.08] bg-background px-2 text-xs"
+              onValueChange={(selectedValue) => setTypeFilter(selectedValue as MemoryType | '')}
+              className="h-8 text-xs w-auto"
             >
-              <option value="">{t('projectMemory.allTypes')}</option>
+              <SelectOption value="">{t('projectMemory.allTypes')}</SelectOption>
               {MEMORY_TYPE_OPTIONS.map((type) => (
-                <option key={type} value={type}>
+                <SelectOption key={type} value={type}>
                   {t(`projectMemory.types.${type}`)}
-                </option>
+                </SelectOption>
               ))}
-            </select>
-            <select
+            </OptionSelect>
+            <OptionSelect
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as LocalMemoryStatus | '')}
-              className="h-8 rounded border border-white/[0.08] bg-background px-2 text-xs"
+              onValueChange={(selectedValue) => setStatusFilter(selectedValue as LocalMemoryStatus | '')}
+              className="h-8 text-xs w-auto"
             >
-              <option value="">{t('projectMemory.allStatuses')}</option>
+              <SelectOption value="">{t('projectMemory.allStatuses')}</SelectOption>
               {(['active', 'superseded', 'archived'] as const).map((item) => (
-                <option key={item} value={item}>
+                <SelectOption key={item} value={item}>
                   {t(`projectMemory.statuses.${item}`)}
-                </option>
+                </SelectOption>
               ))}
-            </select>
+            </OptionSelect>
             <button
               onClick={() => setPinnedOnly((value) => !value)}
               className={cn(
@@ -544,17 +545,17 @@ function LocalMemoryEditor({
         className="w-full resize-y rounded border border-white/[0.1] bg-black/10 p-3 text-xs leading-relaxed outline-none focus:border-primary/40"
       />
       <div className="grid gap-2 sm:grid-cols-3">
-        <select
+        <OptionSelect
           value={type}
-          onChange={(event) => setType(event.target.value as MemoryType)}
-          className="h-9 rounded border border-white/[0.1] bg-background px-2 text-xs"
+          onValueChange={(selectedValue) => setType(selectedValue as MemoryType)}
+          className="h-9 text-xs"
         >
           {MEMORY_TYPE_OPTIONS.map((item) => (
-            <option key={item} value={item}>
+            <SelectOption key={item} value={item}>
               {t(`projectMemory.types.${item}`)}
-            </option>
+            </SelectOption>
           ))}
-        </select>
+        </OptionSelect>
         <input
           value={scope}
           onChange={(event) => setScope(event.target.value)}

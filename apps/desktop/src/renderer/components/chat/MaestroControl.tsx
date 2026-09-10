@@ -1,3 +1,4 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
@@ -270,17 +271,17 @@ function ResourceDetail({
       <div className="grid grid-cols-2 gap-2">
         <label className="text-sm text-muted-foreground">
           {t('maestro.capability')}
-          <select
+          <OptionSelect
             value={resource.capability}
             disabled={readOnly}
-            onChange={(event) =>
-              onChange({ ...resource, capability: event.target.value as MaestroResourceV1['capability'] })
+            onValueChange={(selectedValue) =>
+              onChange({ ...resource, capability: selectedValue as MaestroResourceV1['capability'] })
             }
-            className="mt-1.5 h-9 w-full rounded-md border border-input bg-background px-2.5 text-sm text-foreground"
+            className="mt-1.5 h-9 text-xs"
           >
-            <option value="worker">{t('maestro.capabilities.worker')}</option>
-            <option value="read-only">{t('maestro.capabilities.read-only')}</option>
-          </select>
+            <SelectOption value="worker">{t('maestro.capabilities.worker')}</SelectOption>
+            <SelectOption value="read-only">{t('maestro.capabilities.read-only')}</SelectOption>
+          </OptionSelect>
         </label>
         <label className="text-sm text-muted-foreground">
           {t('maestro.specialties')}

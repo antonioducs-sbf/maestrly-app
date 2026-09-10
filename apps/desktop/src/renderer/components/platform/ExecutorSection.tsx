@@ -1,3 +1,4 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Play, Pause, Settings2, MessageSquare } from 'lucide-react'
@@ -98,32 +99,32 @@ export function ExecutorSection({ connections }: { connections: PlatformConnecti
         {connections.filter((c) => c.state === 'connected').length > 1 ? (
           <label className="block text-xs">
             {L('Kanban connection', 'Conexão com o Kanban')}
-            <select
+            <OptionSelect
               value={connection?.id ?? ''}
-              onChange={(e) => setSettings({ ...settings, connectionId: e.target.value })}
+              onValueChange={(selectedValue) => setSettings({ ...settings, connectionId: selectedValue })}
             >
               {connections
                 .filter((c) => c.state === 'connected')
                 .map((c) => (
-                  <option key={c.id} value={c.id}>
+                  <SelectOption key={c.id} value={c.id}>
                     {c.name}
-                  </option>
+                  </SelectOption>
                 ))}
-            </select>
+            </OptionSelect>
           </label>
         ) : null}
         <label className="block text-xs">
           {L('Who can request work?', 'Quem pode solicitar trabalho?')}
-          <select
-            className="mt-2 block w-full rounded-lg border border-border bg-background p-2 text-sm"
+          <OptionSelect
+            className="mt-2 h-8 text-xs"
             value={settings.mode}
-            onChange={(e) => setSettings({ ...settings, mode: e.target.value as 'personal' | 'team' })}
+            onValueChange={(selectedValue) => setSettings({ ...settings, mode: selectedValue as 'personal' | 'team' })}
           >
-            <option value="personal">{L('Only me — personal computer', 'Só eu — computador pessoal')}</option>
-            <option value="team">
+            <SelectOption value="personal">{L('Only me — personal computer', 'Só eu — computador pessoal')}</SelectOption>
+            <SelectOption value="team">
               {L('Approved projects — team executor', 'Projetos autorizados — executor da equipe')}
-            </option>
-          </select>
+            </SelectOption>
+          </OptionSelect>
         </label>
         <div>
           <p className="text-xs font-medium">{L('Available accounts', 'Contas disponibilizadas')}</p>

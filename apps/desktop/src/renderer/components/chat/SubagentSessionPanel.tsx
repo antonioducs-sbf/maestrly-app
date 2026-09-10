@@ -1,6 +1,7 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Bot, ChevronDown, Loader2, PanelRightClose, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { Bot, Loader2, PanelRightClose, ShieldCheck, TriangleAlert } from 'lucide-react'
 import type { ChatModelMeta, SubagentSessionSummary, SubagentTranscriptPage } from '../../../shared/chat'
 import type { OpenFileReference } from '@/components/MarkdownViewer'
 import { cn } from '@/lib/utils'
@@ -166,18 +167,17 @@ export function SubagentSessionPanel({
         {orderedSessions.length > 1 && (
           <label className="relative mt-2 block">
             <span className="sr-only">{t('subagentSession.select')}</span>
-            <select
+            <OptionSelect
               value={sessionId}
-              onChange={(event) => onSelect(event.target.value)}
-              className="h-7 w-full appearance-none rounded-md border border-white/[0.08] bg-black/20 px-2 pr-7 text-[11px] text-foreground outline-none focus:border-violet-400/40"
+              onValueChange={(selectedValue) => onSelect(selectedValue)}
+              className="h-7 text-[11px]"
             >
               {orderedSessions.map((item) => (
-                <option key={item.id} value={item.id}>
+                <SelectOption key={item.id} value={item.id}>
                   {item.agentName} · {t(`subagentSession.status.${item.status}`)}
-                </option>
+                </SelectOption>
               ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+            </OptionSelect>
           </label>
         )}
 

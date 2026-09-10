@@ -1,3 +1,4 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, Layers3, RotateCcw, Settings2, Sparkles } from 'lucide-react'
@@ -104,6 +105,7 @@ export function ChatSkillsMenu({ conversationId, onChanged }: { conversationId: 
     if (!open) return
     void load()
     const onDoc = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest('[data-select-content]')) return
       if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false)
     }
     const onKey = (event: KeyboardEvent) => {
@@ -228,24 +230,24 @@ export function ChatSkillsMenu({ conversationId, onChanged }: { conversationId: 
                 <label className="mb-1 block text-[10px] uppercase tracking-wide text-muted-foreground">
                   {t('skillsMenu.activeSet')}
                 </label>
-                <select
+                <OptionSelect
                   value={selectionValue}
-                  onChange={(event) => {
-                    const value = event.target.value
+                  onValueChange={(selectedValue) => {
+                    const value = selectedValue
                     if (value === 'all' || value === 'none') setSelection({ kind: value })
                     else setSelection({ kind: 'group', groupId: value.slice('group:'.length) })
                   }}
-                  className="w-full rounded-md border border-white/[0.1] bg-black/30 px-2 py-1.5 text-[12px] text-foreground outline-none"
+                  className="h-8 text-xs"
                 >
-                  <option value="all">{t('skillsMenu.allSkills')}</option>
-                  <option value="none">{t('skillsMenu.noSkills')}</option>
+                  <SelectOption value="all">{t('skillsMenu.allSkills')}</SelectOption>
+                  <SelectOption value="none">{t('skillsMenu.noSkills')}</SelectOption>
                   {state.groups.map((group) => (
-                    <option key={group.id} value={`group:${group.id}`}>
+                    <SelectOption key={group.id} value={`group:${group.id}`}>
                       {group.name} ({group.skills.length})
-                    </option>
+                    </SelectOption>
                   ))}
-                  {state.selectedGroupMissing && <option value={selectionValue}>{t('skillsMenu.deletedGroup')}</option>}
-                </select>
+                  {state.selectedGroupMissing && <SelectOption value={selectionValue}>{t('skillsMenu.deletedGroup')}</SelectOption>}
+                </OptionSelect>
               </div>
 
               <button
@@ -287,17 +289,17 @@ export function ChatSkillsMenu({ conversationId, onChanged }: { conversationId: 
                 <p className="text-[11px] text-muted-foreground">{t('settings.skillGroupsEmpty')}</p>
               ) : (
                 <>
-                  <select
+                  <OptionSelect
                     value={editingGroupId}
-                    onChange={(event) => setEditingGroupId(event.target.value)}
-                    className="w-full rounded-md border border-white/[0.1] bg-black/30 px-2 py-1.5 text-[12px] text-foreground"
+                    onValueChange={(selectedValue) => setEditingGroupId(selectedValue)}
+                    className="h-8 text-xs"
                   >
                     {state.groups.map((group) => (
-                      <option key={group.id} value={group.id}>
+                      <SelectOption key={group.id} value={group.id}>
                         {group.name}
-                      </option>
+                      </SelectOption>
                     ))}
-                  </select>
+                  </OptionSelect>
                   <input
                     value={groupQuery}
                     onChange={(event) => setGroupQuery(event.target.value)}

@@ -1,3 +1,4 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { AlertTriangle, BrainCircuit, Code2, Globe2, MessageSquareText, SlidersHorizontal } from 'lucide-react'
 import { useId } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -22,7 +23,7 @@ export interface ChatGptWebAccessEditorProps {
 }
 
 const selectClassName =
-  'shrink-0 rounded border border-white/10 bg-black/20 px-2 py-1 text-[11px] text-foreground disabled:cursor-not-allowed disabled:opacity-50'
+  'h-7 w-auto shrink-0 text-[11px]'
 
 export function ChatGptWebAccessEditor({
   info,
@@ -258,15 +259,15 @@ export function ChatGptWebAccessEditor({
                   {t(`chatGptWebAccess.${target}Description`)}
                 </span>
               </span>
-              <select
+              <OptionSelect
                 aria-label={t(`chatGptWebAccess.${target}Label`)}
                 value={capabilities[target]}
-                onChange={(event) => setCodeScope(target, event.target.value as 'off' | 'read')}
+                onValueChange={(selectedValue) => setCodeScope(target, selectedValue as 'off' | 'read')}
                 className={selectClassName}
               >
-                <option value="off">{t('chatGptWebAccess.scopeOff')}</option>
-                <option value="read">{t('chatGptWebAccess.scopeRead')}</option>
-              </select>
+                <SelectOption value="off">{t('chatGptWebAccess.scopeOff')}</SelectOption>
+                <SelectOption value="read">{t('chatGptWebAccess.scopeRead')}</SelectOption>
+              </OptionSelect>
             </label>
           ))}
         </div>
@@ -306,17 +307,17 @@ export function ChatGptWebAccessEditor({
                     </span>
                   )}
                 </span>
-                <select
+                <OptionSelect
                   aria-label={server.name}
                   value={server.enabled ? (capabilities.mcp[server.id] ?? 'read') : 'off'}
                   disabled={controlsDisabled || !server.enabled}
-                  onChange={(event) => setMcpScope(server.id, event.target.value as ChatGptWebCapabilityScope)}
+                  onValueChange={(selectedValue) => setMcpScope(server.id, selectedValue as ChatGptWebCapabilityScope)}
                   className={selectClassName}
                 >
-                  <option value="off">{t('chatGptWebAccess.scopeOff')}</option>
-                  <option value="read">{t('chatGptWebAccess.scopeRead')}</option>
-                  <option value="write">{t('chatGptWebAccess.scopeWrite')}</option>
-                </select>
+                  <SelectOption value="off">{t('chatGptWebAccess.scopeOff')}</SelectOption>
+                  <SelectOption value="read">{t('chatGptWebAccess.scopeRead')}</SelectOption>
+                  <SelectOption value="write">{t('chatGptWebAccess.scopeWrite')}</SelectOption>
+                </OptionSelect>
               </label>
             ))}
           </div>

@@ -1,3 +1,4 @@
+import { OptionSelect, SelectOption } from '@/components/ui/option-select'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -716,25 +717,25 @@ function FailoverRouteEditor({
           })}
 
           {candidates.length > 0 && (
-            <select
-              className={cn(inputCls, 'py-1 text-[12px]')}
+            <OptionSelect
+              className="h-8 text-xs"
               disabled={busy}
               value=""
-              onChange={(e) => {
-                const id = e.target.value
+              onValueChange={(selectedValue) => {
+                const id = selectedValue
                 if (!id) return
                 void save(addFallback(route, id))
               }}
               aria-label={t('settings.addFallbackAccount')}
             >
-              <option value="">{t('settings.addFallbackAccount')}</option>
+              <SelectOption value="">{t('settings.addFallbackAccount')}</SelectOption>
               {candidates.map((candidate) => (
-                <option key={candidate.providerId} value={candidate.providerId}>
+                <SelectOption key={candidate.providerId} value={candidate.providerId}>
                   {candidate.label}
                   {!candidate.connected ? ` (${t(`settings.${prefix}Disconnected`)})` : ''}
-                </option>
+                </SelectOption>
               ))}
-            </select>
+            </OptionSelect>
           )}
         </div>
       )}
@@ -1941,22 +1942,22 @@ function DefaultModelPicker({
     <div className="mt-1 flex flex-col gap-2 border-t border-border pt-3">
       <span className="text-[12px] font-medium text-foreground">{t('settings.defaultModelHeading')}</span>
       <div className="flex flex-wrap items-center gap-2">
-        <select
+        <OptionSelect
           value={providerId}
-          onChange={(e) => {
-            setProviderId(e.target.value)
+          onValueChange={(selectedValue) => {
+            setProviderId(selectedValue)
             setModelId('')
             manualChosenRef.current = false
             setManual(false)
           }}
-          className={inputCls}
+          className="h-8 w-auto max-w-full text-[13px]"
         >
           {selectableProviders.map((p) => (
-            <option key={p.id} value={p.id}>
+            <SelectOption key={p.id} value={p.id}>
               {p.name}
-            </option>
+            </SelectOption>
           ))}
-        </select>
+        </OptionSelect>
         {manual ? (
           <input
             disabled={!providerConnected}
@@ -1967,48 +1968,48 @@ function DefaultModelPicker({
             onBlur={() => commit(providerId, modelId)}
           />
         ) : (
-          <select
+          <OptionSelect
             value={modelId}
             disabled={loading || !providerConnected}
-            onChange={(e) => {
-              if (e.target.value === '__manual__') {
+            onValueChange={(selectedValue) => {
+              if (selectedValue === '__manual__') {
                 manualChosenRef.current = true
                 setManual(true)
                 setModelId('')
                 return
               }
-              setModelId(e.target.value)
-              commit(providerId, e.target.value)
+              setModelId(selectedValue)
+              commit(providerId, selectedValue)
             }}
-            className={inputCls}
+            className="h-8 w-auto max-w-full text-[13px]"
           >
-            <option value="">{loading ? t('settings.loadingModels') : t('settings.chooseModel')}</option>
-            {!providerConnected && modelId && <option value={modelId}>{modelId}</option>}
+            <SelectOption value="">{loading ? t('settings.loadingModels') : t('settings.chooseModel')}</SelectOption>
+            {!providerConnected && modelId && <SelectOption value={modelId}>{modelId}</SelectOption>}
             {models.map((m) => (
-              <option key={m} value={m}>
+              <SelectOption key={m} value={m}>
                 {m}
-              </option>
+              </SelectOption>
             ))}
-            <option value="__manual__">{t('settings.enterIdManually')}</option>
-          </select>
+            <SelectOption value="__manual__">{t('settings.enterIdManually')}</SelectOption>
+          </OptionSelect>
         )}
         {meta?.reasoning && (
-          <select
+          <OptionSelect
             value={efforts.includes(reasoning) ? reasoning : 'off'}
-            onChange={(e) => {
-              setReasoning(e.target.value)
-              commit(providerId, modelId, e.target.value)
+            onValueChange={(selectedValue) => {
+              setReasoning(selectedValue)
+              commit(providerId, modelId, selectedValue)
             }}
-            className={inputCls}
+            className="h-8 w-auto max-w-full text-[13px]"
             title={t('reasoning.buttonTitle')}
           >
-            <option value="off">{t('reasoning.default')}</option>
+            <SelectOption value="off">{t('reasoning.default')}</SelectOption>
             {efforts.map((eff) => (
-              <option key={eff} value={eff}>
+              <SelectOption key={eff} value={eff}>
                 {eff}
-              </option>
+              </SelectOption>
             ))}
-          </select>
+          </OptionSelect>
         )}
         <button
           type="button"
@@ -2106,10 +2107,10 @@ function ImageInterpreterPicker({
         <p className="mt-0.5 text-[11px] text-muted-foreground">{t('settings.imageInterpreterDescription')}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <select
+        <OptionSelect
           value={providerId}
-          onChange={(e) => {
-            const next = e.target.value
+          onValueChange={(selectedValue) => {
+            const next = selectedValue
             setProviderId(next)
             setModelId('')
             setManual(false)
@@ -2117,15 +2118,15 @@ function ImageInterpreterPicker({
             setEffort('off')
             if (!next) commit('', '', 'off')
           }}
-          className={inputCls}
+          className="h-8 w-auto max-w-full text-[13px]"
         >
-          <option value="">{t('settings.imageInterpreterOff')}</option>
+          <SelectOption value="">{t('settings.imageInterpreterOff')}</SelectOption>
           {connectedProviders.map((p) => (
-            <option key={p.id} value={p.id}>
+            <SelectOption key={p.id} value={p.id}>
               {p.name}
-            </option>
+            </SelectOption>
           ))}
-        </select>
+        </OptionSelect>
         {providerId &&
           (manual ? (
             <input
@@ -2136,48 +2137,48 @@ function ImageInterpreterPicker({
               onBlur={() => commit(providerId, modelId.trim(), effort)}
             />
           ) : (
-            <select
+            <OptionSelect
               value={modelId}
               disabled={loading}
-              onChange={(e) => {
-                if (e.target.value === '__manual__') {
+              onValueChange={(selectedValue) => {
+                if (selectedValue === '__manual__') {
                   setManual(true)
                   setModelId('')
                   return
                 }
-                setModelId(e.target.value)
+                setModelId(selectedValue)
                 setEffort('off')
-                commit(providerId, e.target.value, 'off')
+                commit(providerId, selectedValue, 'off')
               }}
-              className={inputCls}
+              className="h-8 w-auto max-w-full text-[13px]"
             >
-              <option value="">{loading ? t('settings.loadingModels') : t('settings.chooseModel')}</option>
-              {modelId && !models.includes(modelId) && <option value={modelId}>{modelId}</option>}
+              <SelectOption value="">{loading ? t('settings.loadingModels') : t('settings.chooseModel')}</SelectOption>
+              {modelId && !models.includes(modelId) && <SelectOption value={modelId}>{modelId}</SelectOption>}
               {models.map((m) => (
-                <option key={m} value={m}>
+                <SelectOption key={m} value={m}>
                   {m}
-                </option>
+                </SelectOption>
               ))}
-              <option value="__manual__">{t('settings.enterIdManually')}</option>
-            </select>
+              <SelectOption value="__manual__">{t('settings.enterIdManually')}</SelectOption>
+            </OptionSelect>
           ))}
         {providerId && modelId && meta?.reasoning && (
-          <select
+          <OptionSelect
             value={efforts.includes(effort) ? effort : 'off'}
-            onChange={(e) => {
-              setEffort(e.target.value)
-              commit(providerId, modelId, e.target.value)
+            onValueChange={(selectedValue) => {
+              setEffort(selectedValue)
+              commit(providerId, modelId, selectedValue)
             }}
-            className={inputCls}
+            className="h-8 w-auto max-w-full text-[13px]"
             title={t('reasoning.buttonTitle')}
           >
-            <option value="off">{t('reasoning.default')}</option>
+            <SelectOption value="off">{t('reasoning.default')}</SelectOption>
             {efforts.map((eff) => (
-              <option key={eff} value={eff}>
+              <SelectOption key={eff} value={eff}>
                 {eff}
-              </option>
+              </SelectOption>
             ))}
-          </select>
+          </OptionSelect>
         )}
       </div>
       {providerId && modelId && meta?.vision === false && (

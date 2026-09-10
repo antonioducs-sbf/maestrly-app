@@ -200,13 +200,13 @@ export function SearchSelect({
         onMouseEnter={() => setActiveIndex(index)}
         onClick={() => pick(item.id)}
         className={cn(
-          'flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-white/[0.06]',
-          activeIndex === index && 'bg-white/[0.06]',
+          'flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground',
+          activeIndex === index && 'bg-accent text-accent-foreground',
           selected && 'text-foreground',
           item.disabled && 'cursor-not-allowed opacity-45 hover:bg-transparent'
         )}
       >
-        <Check className={cn('size-3.5 shrink-0', selected ? 'text-primary opacity-100' : 'opacity-0')} />
+        <Check className={cn('size-3.5 shrink-0', selected ? 'opacity-100' : 'opacity-0')} />
 
         <span className="min-w-0 flex-1 truncate" title={item.hint ? `${item.label} · ${item.hint}` : item.label}>
           {item.label}
@@ -238,7 +238,7 @@ export function SearchSelect({
         }}
         onClick={() => (open ? setOpen(false) : openPanel())}
         className={cn(
-          'flex h-8 w-full items-center justify-between gap-1 rounded-md border bg-transparent px-2 text-xs text-foreground transition-colors hover:bg-white/[0.04]',
+          'flex h-8 w-full items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-xs text-foreground shadow-sm focus:outline-none focus:ring-1 focus:ring-ring',
           invalid ? 'border-amber-400/60' : 'border-input',
           disabled && 'cursor-not-allowed opacity-50'
         )}
@@ -256,7 +256,7 @@ export function SearchSelect({
         <div
           style={avoidOverflow ? panelStyle : undefined}
           className={cn(
-            'absolute left-0 z-[60] w-full overflow-hidden rounded-md border border-border bg-[#1E1E21] shadow-xl',
+            'absolute left-0 z-[60] w-full overflow-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md',
             !avoidOverflow && (up ? 'bottom-full mb-1' : 'top-full mt-1'),
             contentClassName
           )}

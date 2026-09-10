@@ -62,7 +62,8 @@ for (const locale of ['en', 'pt-BR'] as const) {
             default: 'Assinatura Claude',
           }
     app = await electron.launch({
-      args: [mainEntry],
+      executablePath: process.env.MAESTRLY_PACKAGED_EXECUTABLE,
+      args: process.env.MAESTRLY_PACKAGED_EXECUTABLE ? ['--use-mock-keychain'] : [mainEntry],
       timeout: 20_000,
       env: {
         ...process.env,
@@ -174,11 +175,23 @@ for (const locale of ['en', 'pt-BR'] as const) {
     await expect(checkbox).not.toBeChecked()
     await checkbox.check()
     await expectSaved([])
-    await expect(dropdown.locator('option')).toHaveText([copy.add, copy.default, 'Personal'])
-    await dropdown.selectOption(claude)
+    await expect(dropdown).toHaveText(copy.add)
+    await dropdown.click()
+    await expect(win.getByRole('option')).toHaveText([copy.add, copy.default, 'Personal'])
+    await testInfo.attach('Standard select open', { body: await win.screenshot({ path: testInfo.outputPath('standard-select-open.png'), animations: 'disabled', style: 'html { background: #252929 !important; }' }), contentType: 'image/png' })
+    await win.getByRole('option', { name: copy.default, exact: true }).click()
     await expectSaved([claude])
-    await expect(dropdown.locator('option')).toHaveText([copy.add, 'Personal'])
-    await dropdown.selectOption(personal)
+    await expect(dropdown).toHaveText(copy.add)
+    await dropdown.focus()
+    await win.keyboard.press('ArrowDown')
+    await expect(win.getByRole('option')).toHaveText([copy.add, 'Personal'])
+    await win.keyboard.press('Escape')
+    await expect(dropdown).toBeFocused()
+    await dropdown.click()
+    await expect(win.getByRole('option', { name: copy.add, exact: true })).toBeFocused()
+    await win.keyboard.press('End')
+    await expect(win.getByRole('option', { name: 'Personal', exact: true })).toBeFocused()
+    await win.keyboard.press('Enter')
     await expectSaved([claude, personal])
     await expect(dropdown).toHaveCount(0)
     await expect(card.getByRole('button', { name: copy.up, exact: true }).first()).toBeDisabled()
@@ -191,7 +204,9 @@ for (const locale of ['en', 'pt-BR'] as const) {
     await expectSaved([claude, personal])
     await card.getByRole('button', { name: copy.remove, exact: true }).first().click()
     await expectSaved([personal])
-    await expect(dropdown.locator('option')).toHaveText([copy.add, copy.default])
+    await dropdown.click()
+    await expect(win.getByRole('option')).toHaveText([copy.add, copy.default])
+    await win.keyboard.press('Escape')
     const reads = (await saved()).reads
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.send('chat:claude-subscription:auth-changed', {
@@ -207,7 +222,9 @@ for (const locale of ['en', 'pt-BR'] as const) {
     await expect(card.getByRole('button', { name: copy.remove, exact: true })).toHaveCount(1)
     await expect(card.getByRole('button', { name: copy.remove, exact: true }).locator('..')).toContainText('Personal')
     await expectSaved([personal])
-    await expect(dropdown.locator('option')).toHaveText([copy.add, copy.default])
+    await dropdown.click()
+    await expect(win.getByRole('option')).toHaveText([copy.add, copy.default])
+    await win.keyboard.press('Escape')
     const shot = testInfo.outputPath(`claude-rotation-${locale}.png`)
     await card.screenshot({ path: shot, animations: 'disabled' })
     await testInfo.attach('Saved Claude rotation', {

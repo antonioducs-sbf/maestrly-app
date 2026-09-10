@@ -22,6 +22,7 @@ export function Login({ onSignedIn }: { onSignedIn(): void }) {
   }
 
   return <main className="login-shell">
+    <div className="login-atmosphere" aria-hidden="true" />
     <section className="login-mark" aria-label={t("About Maestrly")}>
       <img className="brand-symbol" src="/brand/mark-full.svg" alt="Maestrly" />
       <p className="eyebrow">{t("Maestrly")}</p>

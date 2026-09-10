@@ -37,7 +37,8 @@ export async function claimJob(
     await client.query("update runners set repositories=$2,repositories_seen_at=now(),last_seen_at=now(),status='online' where id=$1",[input.runnerId,JSON.stringify(inventory)])
     if(input.automationCapabilities) await client.query('update runners set automation_capabilities=$2,automation_seen_at=now() where id=$1',[input.runnerId,input.automationCapabilities])
     const active = await client.query<{ count: string }>(`
-      select count(*)::text as count from runs where runner_id = $1 and state in ('claimed', 'running', 'cancelling')
+      select ((select count(*) from runs where runner_id = $1 and state in ('claimed', 'running', 'cancelling'))
+        + (select count(*) from chat_turns where runner_id=$1 and state in ('running','waiting_input','cancelling')))::text as count
     `, [input.runnerId])
     if (Number(active.rows[0]!.count) >= Number(runner.max_concurrency)) return null
 

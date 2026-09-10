@@ -9,6 +9,7 @@ export interface TransactionContext {
 }
 
 const activeTransactions = new AsyncLocalStorage<{pool:DatabasePool;client:DatabaseClient;context:TransactionContext}>()
+const actorUser=(actor:Actor)=>actor.type==='human'||actor.type==='desktop_agent'?actor.userId:actor.type==='execution_agent'?actor.requestedByUserId:''
 
 export async function inTenantTransaction<T>(
   pool: DatabasePool,
@@ -19,9 +20,10 @@ export async function inTenantTransaction<T>(
   if(active?.pool===pool && active.context.organizationId===context.organizationId) {
     // HTTP idempotency and domain changes must commit or roll back together.
     const previousActor=JSON.stringify(active.context.actor),nextActor=JSON.stringify(context.actor)
-    if(previousActor!==nextActor) await active.client.query("select set_config('app.actor',$1,true)",[nextActor])
-    try {return await operation(active.client)}
-    finally {if(previousActor!==nextActor) await active.client.query("select set_config('app.actor',$1,true)",[previousActor]).catch(()=>undefined)}
+    const changed=previousActor!==nextActor||active.context.projectId!==context.projectId
+    if(changed) await active.client.query("select set_config('app.actor',$1,true),set_config('app.user_id',$2,true),set_config('app.project_id',$3,true)",[nextActor,actorUser(context.actor),context.projectId??''])
+    try {return await activeTransactions.run({...active,context},()=>operation(active.client))}
+    finally {if(changed) await active.client.query("select set_config('app.actor',$1,true),set_config('app.user_id',$2,true),set_config('app.project_id',$3,true)",[previousActor,actorUser(active.context.actor),active.context.projectId??'']).catch(()=>undefined)}
   }
   const client = await pool.connect()
   try {

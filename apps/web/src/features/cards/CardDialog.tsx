@@ -274,7 +274,7 @@ function CardEditor({
           {t('Parent card')}: {detail.parent.title}
         </button>
       ) : null}
-      <nav className="detail-tabs" aria-label={t('Card details')} role="tablist">
+      <nav className="detail-tabs segmented" aria-label={t('Card details')} role="tablist">
         {tabs.map((item) => (
           <button
             key={item}

@@ -30,7 +30,7 @@ export function Modal({
   return (
     <dialog
       ref={ref}
-      className={'form-dialog ' + (wide ? 'detail-dialog' : '')}
+      className={'form-dialog dialog-enter ' + (wide ? 'detail-dialog' : '')}
       aria-labelledby={id}
       onCancel={(e) => {
         e.preventDefault()

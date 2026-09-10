@@ -1,3 +1,4 @@
+import {autonomousPolicy} from '../autonomous'
 import { randomUUID } from 'node:crypto'
 import type { ChatModelRef } from '../../../shared/chat'
 import type { SubagentExecutionSnapshotV1 } from '../../../shared/subagent-profiles'
@@ -444,12 +445,14 @@ export async function runCodexSubagent(args: RunCodexSubagentArgs): Promise<Code
           // visible in the parent message, so they must disable it explicitly.
           'features.image_generation': false,
           ...nativeSubagentSuppressionConfig(),
+          ...(autonomousPolicy('')?{'features.shell_tool':false,web_search:'disabled','features.default_mode_request_user_input':false,'features.apps':false,'features.plugins':false,'skills.include_instructions':false,'features.skill_mcp_dependency_install':false}:{}),
           ...(args.readOnly ? { 'features.shell_tool': false, web_search: 'disabled' } : {}),
         },
         developerInstructions: [
           args.definition.prompt,
           `You are the delegated Maestrly subagent "${args.agentName}". Work only on the supplied task.`,
           MEMORY_TOOL_GUIDANCE,
+          autonomousPolicy('')?'This is unattended work. Never ask for a plan approval or an answer from a person. Resolve ordinary technical choices; return concrete blockers to the parent. Use only the provided Maestrly tools under the inherited permissions.':'',
           args.readOnly
             ? 'This delegated run is strictly read-only. Do not modify files, execute commands, or spawn subagents.'
             : 'Do not spawn subagents. Return a concise result to the parent when the task is complete.',

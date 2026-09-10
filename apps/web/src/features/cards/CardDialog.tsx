@@ -1,3 +1,4 @@
+import { ExecutionConversation } from '../automations/ExecutionConversation.js'
 import { CardAutomation } from '../automations/CardAutomation.js'
 import { RunEvents } from '../automations/RunEvents.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -659,6 +660,7 @@ function CardEditor({
               {run.startedAt ? <time>{dateTime(run.startedAt)}</time> : null}
             </header>
             <Markdown value={run.outcome?.summary ?? run.outcome?.failure ?? ''} />
+            <ExecutionConversation organizationId={card.organizationId} cardId={card.id} runId={run.id}/>
             <RunEvents organizationId={card.organizationId} cardId={card.id} runId={run.id}/>
           </article>
         ))}

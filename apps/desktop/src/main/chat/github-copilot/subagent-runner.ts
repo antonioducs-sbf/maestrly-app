@@ -21,7 +21,7 @@ import { compileFableSubagentPrompt } from '../fable/prompt'
 import { chatDiag } from '../diag-log'
 
 const SESSION_WAIT_TIMEOUT_MS = 24 * 60 * 60 * 1_000
-const FORBIDDEN_CHILD_TOOLS = new Set(['task', 'delegate', 'review_plan', 'ask_question', 'todo_write'])
+const FORBIDDEN_CHILD_TOOLS = new Set(['task', 'delegate', 'review_plan', 'ask_question', 'todo_write', 'executor_report'])
 type CopilotReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface RunGitHubCopilotSubagentArgs {

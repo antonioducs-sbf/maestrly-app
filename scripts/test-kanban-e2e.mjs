@@ -65,17 +65,27 @@ try {
   let apiChild=start(process.execPath,['--import','tsx','apps/server/src/main.ts'],env)
   start('npm',['exec','--workspace','@maestrly/web','--','vite','preview','--host','127.0.0.1','--port',String(webPort),'--strictPort'],env)
   await ready(apiUrl+'/api/v1/health/ready');await ready(webUrl)
-  command(process.execPath,['--import','tsx','scripts/smoke-kanban-runner.ts'],env)
-  for(const locale of ['en','pt-BR']) {
-    if(locale==='pt-BR') {
-      try {if(process.platform==='win32')apiChild.kill('SIGKILL');else process.kill(-apiChild.pid,'SIGKILL')}catch{}
-      await new Promise(resolve=>apiChild.once('exit',resolve))
-      apiChild=start(process.execPath,['--import','tsx','apps/server/src/main.ts'],env)
-      await ready(apiUrl+'/api/v1/health/ready')
-    }
-    command('npm',['run','test:e2e','--workspace','@maestrly/web','--','--project='+locale,...process.argv.slice(2)],env)
+  async function restartApi() {
+    try {if(process.platform==='win32')apiChild.kill('SIGTERM');else process.kill(-apiChild.pid,'SIGTERM')}catch{}
+    if(apiChild.exitCode===null)await new Promise(resolve=>apiChild.once('exit',resolve))
+    apiChild=start(process.execPath,['--import','tsx','apps/server/src/main.ts'],env)
+    await ready(apiUrl+'/api/v1/health/ready')
   }
-  if(process.env.MAESTRLY_DESKTOP_E2E==='1')command('npm',['run','test:e2e','--workspace','@maestrly/desktop','--','personal-device.spec.ts'],env)
+  if(process.env.MAESTRLY_DESKTOP_E2E!=='only'){
+    command(process.execPath,['--import','tsx','scripts/smoke-kanban-runner.ts'],env)
+    for(const locale of ['en','pt-BR']) {
+      if(locale==='pt-BR')await restartApi()
+      const args=process.argv.slice(2)
+      // Independent auth-heavy scenarios get a fresh rate-limit window; production limits stay enabled.
+      command('npm',['run','test:e2e','--workspace','@maestrly/web','--','--project='+locale,...(args.length?args:['--grep-invert','real team:'])],env)
+      if(!args.length){await restartApi();command('npm',['run','test:e2e','--workspace','@maestrly/web','--','--project='+locale,'--grep','real team:'],env)}
+    }
+  }
+  if(['1','only'].includes(process.env.MAESTRLY_DESKTOP_E2E)){
+    await restartApi()
+    if(!process.env.MAESTRLY_PACKAGED_EXECUTABLE)command('npm',['run','build:desktop'],env)
+    command('npm',['run','test:e2e','--workspace','@maestrly/desktop','--','personal-device.spec.ts'],env)
+  }
 } finally {
   for(const child of children) {
     try{if(process.platform==='win32')child.kill('SIGTERM');else process.kill(-child.pid,'SIGTERM')}catch{}

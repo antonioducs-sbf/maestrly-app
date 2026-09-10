@@ -19,12 +19,15 @@ const fixture = vi.hoisted(() => ({
       repositoryBindingId: 'repo-b',
     },
   ],
+  mode: 'personal' as 'personal' | 'team',
   owner: 'user-a',
   claim: null as unknown,
   request: vi.fn(async (_method: string, url: string, _options?: unknown): Promise<any> => {
     if (url.endsWith('/me')) return { userId: fixture.owner }
     if (url.endsWith('/personal-devices'))
       return { runnerId: 'personal-runner', credential: 'fixture-credential', ownerUserId: fixture.owner }
+    if (url.endsWith('/runner-enrollments')) return { token: 'enrollment' }
+    if (url.endsWith('/runners/enroll')) return { runnerId: 'shared-runner', credential: 'shared-credential' }
     if (url.endsWith('/presence')) return { enabled: true }
     if (url.endsWith('/claim')) return fixture.claim
     return null
@@ -73,10 +76,29 @@ vi.mock('@maestrly/runner-core', () => ({
   CodexExecutor: class {},
   ClaudeAgentExecutor: class {},
 }))
+vi.mock('../../src/main/platform/executor-settings', () => ({
+  executorSettings: () => ({ mode: fixture.mode, providerIds: ['codex-subscription'] }),
+  saveExecutorSettings: vi.fn(),
+}))
+vi.mock('../../src/main/platform/desktop-executor', () => ({
+  DesktopChatExecutor: class {},
+  DesktopModelCatalog: class {
+    async read() {
+      return {
+        version: 1,
+        models: [{ provider: 'maestrly', model: 'model', label: 'Codex' }],
+        maestro: true,
+        subagents: true,
+        preCommands: false,
+        issues: [],
+      }
+    }
+  },
+}))
 vi.mock('../../src/main/platform/connection-service', () => ({
   platformConnections: {
     list: () => [{ id: 'connection', url: 'http://instance.test', instanceId: 'instance' }],
-    token: () => 'fixture-human-token',
+    authenticatedToken: async () => 'fixture-human-token',
   },
 }))
 vi.mock('../../src/main/platform/project-bindings', () => ({
@@ -137,6 +159,19 @@ describe('embedded runner Git mapping', () => {
     } finally {
       await host.stop()
     }
+  })
+  it('enrolls team mode separately and rejects personal jobs', async () => {
+    fixture.mode='team';fixture.request.mockClear()
+    const host=new EmbeddedRunnerHost()
+    try {
+      expect(await host.start('connection')).toMatchObject({state:'running',mode:'team',deviceId:'shared-runner'})
+      expect(fixture.request.mock.calls.some(c=>c[1]==='/api/v1/personal-devices')).toBe(false)
+      fixture.claim={envelope:{organizationId:'org',snapshot:{personalDevice:{deviceId:'personal-runner',ownerUserId:'user-a'}}}}
+      await expect(fixture.server!.claim()).rejects.toThrow(/shared jobs/)
+      fixture.claim=null
+      await host.stop()
+      expect(fixture.request).toHaveBeenCalledWith('POST','/api/v1/runners/presence',expect.objectContaining({body:{online:false}}))
+    } finally {fixture.mode='personal';fixture.claim=null;await host.stop()}
   })
   it('rejects unavailable local Git before creating a remote identity', async () => {
     fixture.request.mockClear()

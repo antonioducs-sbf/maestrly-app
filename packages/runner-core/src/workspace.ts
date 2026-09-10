@@ -17,6 +17,8 @@ export interface RepositoryAvailability {
   error?: string
 }
 export interface WorkspaceOptions {
+  retainWorkspace?:boolean
+
   repositories: ApprovedRepository[]
   baseDirectory?: string
   isolated?: boolean
@@ -73,6 +75,7 @@ export class WorkspaceManager {
   }
   async prepare(envelope: ExecutionEnvelope): Promise<PreparedEnvironment> {
     const bindingId = envelope.snapshot.repositoryBindingId
+    if(this.options.baseDirectory)await mkdir(this.options.baseDirectory,{recursive:true})
     const root = await mkdtemp(path.join(this.options.baseDirectory ?? os.tmpdir(), `maestrly-${envelope.runId}-`))
     const workspacePath = path.join(root, 'workspace')
     try {
@@ -100,7 +103,7 @@ export class WorkspaceManager {
         gitBaseCommit,
         evidenceGitDirectory,
         repositoryBindingId: bindingId ?? undefined,
-        cleanup: () => rm(root, { recursive: true, force: true }),
+        cleanup: () => this.options.retainWorkspace?Promise.resolve():rm(root, { recursive: true, force: true }),
       }
     } catch (error) {
       await rm(root, { recursive: true, force: true })

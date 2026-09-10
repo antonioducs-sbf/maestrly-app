@@ -1,6 +1,6 @@
 # Runner operations
 
-The runner is a Node process without Electron or a display server.
+For graphical setup with connected accounts, subscriptions, skills, MCPs and persistent conversations, use the [Maestrly desktop executor](desktop-executor.md). The optional CLI below is a Node process without Electron or a display server.
 
 ```bash
 npm run build:protocol
@@ -18,7 +18,7 @@ node apps/runner/dist/cli.js run
 
 The default lease is 60 seconds and renews every 15 seconds. If renewal cannot be confirmed before the safety margin, the executor is cancelled and cleanup is awaited. On restart, the local journal is reconciled before another claim. A matching PID alone is never treated as proof that a process belongs to an old execution.
 
-Use `status` for the server-visible state and `revoke` to invalidate the machine credential. Closing the desktop stops only its explicitly enabled embedded runner; continuous capacity should use this headless application.
+Use `status` for the server-visible state and `revoke` to invalidate the machine credential. The desktop can remain active after closing its window when **Continue in background** is enabled. Quitting the desktop stops its executor; the CLI has its own independent lifecycle.
 
 ## Isolation
 
@@ -54,4 +54,4 @@ Timeout spans workspace preparation, pre-commands and agent stages. It cancels t
 
 ## Developer computers
 
-Use [personal devices](personal-devices.md) for a developer's own computer. The desktop's **Enable personal execution** control creates a user-owned device, excluded from the shared runner pool. Web requests choose the device per execution. Shared headless runners and column defaults continue to serve team automation.
+Use [personal devices](personal-devices.md) for a developer's own computer. The desktop's **Maestrly executor → Only me** mode creates a user-owned device, excluded from the shared runner pool. Web requests choose the device per execution. Shared headless runners and column defaults continue to serve team automation.

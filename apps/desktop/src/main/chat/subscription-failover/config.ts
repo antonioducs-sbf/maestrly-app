@@ -1,3 +1,4 @@
+import {autonomousProviderAllowed} from '../autonomous'
 import {
   isSubscriptionFailoverProviderId,
   subscriptionAccountId,
@@ -212,7 +213,7 @@ export function freezeFailoverChain(primaryProviderId: string): string[] {
   if (!primary) return []
   const route = getFailoverRoute(primary)
   if (route?.enabled && route.fallbackProviderIds.length > 0) {
-    return [primary, ...route.fallbackProviderIds]
+    return [primary, ...route.fallbackProviderIds].filter(id=>autonomousProviderAllowed(id))
   }
-  return [primary]
+  return autonomousProviderAllowed(primary) ? [primary] : []
 }

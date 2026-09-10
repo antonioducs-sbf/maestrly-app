@@ -1,3 +1,4 @@
+import { autonomousPolicy } from './autonomous'
 /**
  * BYOK chat service in main: registers `chat:*` IPC channels, orchestrates the runner per conversation,
  * forwards permission broker events to the renderer, and maintains conversation status (working/ready).
@@ -2091,12 +2092,12 @@ export async function listChatExecutionModels(
  * Minimal catalog a cloud runner may publish. Excludes account names, base URLs, keys,
  * fingerprints, and native provider state; includes only executable pairs and supported efforts.
  */
-export async function listChatRunnerCapabilities(): Promise<
+export async function listChatRunnerCapabilities(includeApiProviders=false): Promise<
   Array<{ providerId: string; modelId: string; reasoningEfforts: string[]; fastMode: boolean }>
 > {
   const providers = await listChatExecutionModels({
     refreshSubscriptionAuth: true,
-    portableExecutionOnly: true,
+    portableExecutionOnly: !includeApiProviders,
     subscriptionProviderTimeoutMs: 8_000,
   })
   const pairs = providers.flatMap((provider) =>
@@ -3042,6 +3043,9 @@ async function currentChatHistoryStats(
 
 /** Internal send options (used by plan decision turns; not exposed to user IPC). */
 interface StartSendOpts {
+  runnerAdmission?: (run:ActiveRun)=>void
+  runnerSignal?:AbortSignal
+
   /** Marks the user message internal (sent to the model, but the renderer does NOT draw a bubble). */
   internal?: boolean
   /** Extra HIDDEN parts (e.g. review-loop findings) — sent to the model, not rendered. */
@@ -3093,6 +3097,8 @@ async function startSend(
 
   // COMPANION AUTOMATION LOCK (central guard): while review/bootstrap is active, only its owning internal turn
   // passes. Covers chat:send, resend, plans, and server-side starts — all enter here.
+  if(opts?.runnerSignal?.aborted)return {ok:false,error:'cancelled'}
+  if(autonomousPolicy(conversationId)&&!opts?.runnerAdmission&&!opts?.internal)return {ok:false,error:'executor-active'}
   const internalLoop = opts?.internalLoop
   const internalTurnMode = internalLoop?.turnPolicy === 'reviewer-readonly' ? ('ask' as const) : ('agent' as const)
   const turnBehavior: ChatBehavior = internalLoop ? internalTurnMode : behaviorFor(conversationId)
@@ -3945,6 +3951,7 @@ async function startSend(
     }
     // Create the internal turn handle HERE (same tick as admission) — never via `active.get` after start.
     internalLoop?.onAdmitted(run)
+    opts?.runnerAdmission?.(run)
     // The BYOK runner received a preallocated response ID from main; signal early so compaction
     // and mention reads count toward duration too. The Codex adapter still governs its own message.
     if (!useOfficialSubscription) {
@@ -8781,4 +8788,24 @@ export function disposeChat(): Promise<void> {
     for (const providerId of grokProviderIds) invalidateProvider(providerId)
   })()
   return chatDisposePromise
+}
+
+/** Host-only execution entry point: full chat engine and persistence, with an admission-safe handle. */
+export async function startExecutorChatTurn(input:{conversationId:string;prompt:string;signal:AbortSignal}):Promise<InternalTurnHandle>{
+ if(!savedDeps)throw new Error('Chat service not initialized')
+ const wc=getMainWebContents();if(!wc)throw new Error('Desktop window unavailable')
+ let handle:InternalTurnHandle|undefined
+ let admitted:ActiveRun|undefined
+ const cancel=()=>{admitted?.controller.abort();getBroker().rejectConversation(input.conversationId);getQuestionBroker().rejectConversation(input.conversationId)}
+ input.signal.addEventListener('abort',cancel,{once:true})
+ try{
+  const result=await startSend(savedDeps,wc,input.conversationId,input.prompt,undefined,{runnerSignal:input.signal,runnerAdmission:run=>{
+   admitted=run
+   if(input.signal.aborted)cancel()
+   handle={executionId:input.conversationId,conversationId:input.conversationId,assistantMessageId:()=>run.messageId||null,done:run.outcome,cancel}
+  }})
+  if(!result.ok||!handle)throw new Error(!result.ok?result.error??'Execution unavailable':'Execution was not admitted')
+  void handle.done.finally(()=>input.signal.removeEventListener('abort',cancel))
+  return handle
+ }catch(error){input.signal.removeEventListener('abort',cancel);throw error}
 }

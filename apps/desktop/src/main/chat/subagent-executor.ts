@@ -1,3 +1,4 @@
+import {autonomousProviderAllowed} from './autonomous'
 import type { ToolSet } from 'ai'
 import type { ChatPermMode, SubagentResumeStatus, SubagentRuntimeHandle } from '../../shared/chat'
 import type { ChatBehavior } from '../../shared/conversation-experience'
@@ -275,6 +276,7 @@ export async function executeSubagent(args: {
     else recordResume('recreated', result.resumeReason ?? 'resume-rejected')
   }
   const runProvider = async (): Promise<SubagentExecutionResult> => {
+    if(!autonomousProviderAllowed(effective.providerId,args.conversationId))throw new Error('This provider account is not authorized for the desktop executor.')
     if (isClaudeSubscriptionProvider(effective.providerId)) {
       let runtimeSignature = ''
       let behaviorProfile: ReturnType<typeof resolveFableBehaviorProfile>['profile'] | undefined

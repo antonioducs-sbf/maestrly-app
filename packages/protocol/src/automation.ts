@@ -21,7 +21,7 @@ export const columnAutomationSchema = z
   .object({
     enabled: z.boolean().default(false),
     autoRun: z.boolean().default(false),
-    provider: z.enum(['codex', 'claude-agent']).default('codex'),
+    provider: z.enum(['codex', 'claude-agent', 'maestrly']).default('codex'),
     model: z.string().max(160).default(''),
     effort: z.string().max(80).nullable().default(null),
     fastMode: z.boolean().default(false),
@@ -42,14 +42,14 @@ export const columnAutomationSchema = z
   .strict()
 export const cardAutomationOverrideSchema = z
   .object({
-    provider: z.enum(['codex', 'claude-agent']).optional(),
+    provider: z.enum(['codex', 'claude-agent', 'maestrly']).optional(),
     model: z.string().min(1).max(160).optional(),
     effort: z.string().max(80).nullable().optional(),
     fastMode: z.boolean().optional(),
   })
   .strict()
 export const executorModelSchema = z.object({
-  provider: z.enum(['codex', 'claude-agent']),
+  provider: z.enum(['codex', 'claude-agent', 'maestrly']),
   model: z.string().min(1).max(160),
   label: z.string().min(1).max(200),
   efforts: z.array(z.string().min(1).max(80)).max(20).default([]),
@@ -101,13 +101,14 @@ export function effectiveAutomation(
   config: ColumnAutomation,
   override: CardAutomationOverride | null
 ): ColumnAutomation {
-  if (!override) return { ...config }
-  return {
+  const effective = {
     ...config,
     ...override,
-    model: override.model ?? (override.provider && override.provider !== config.provider ? '' : config.model),
-    effort: override.effort === undefined ? config.effort : override.effort,
+    model: override?.model ?? (override?.provider && override.provider !== config.provider ? '' : config.model),
+    effort: override?.effort === undefined ? config.effort : override.effort,
   }
+  // The desktop operator authorizes unattended work when enabling this executor.
+  return effective.provider === 'maestrly' ? { ...effective, approvalRequired: false } : effective
 }
 export function modelSupports(config: ColumnAutomation, model: ExecutorModel) {
   return (

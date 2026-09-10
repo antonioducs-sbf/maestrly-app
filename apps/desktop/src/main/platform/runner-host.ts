@@ -1,21 +1,16 @@
-import { resolveClaude } from '../chat/claude-agent-sdk/resolve-claude'
-import { resolveCodexRuntime } from '../chat/codex-subscription/runtime-resolver'
-import { readyRuntimeAsset } from '../runtime-assets/app-service'
+import { DesktopChatExecutor, DesktopModelCatalog } from './desktop-executor'
+import { executorSettings, saveExecutorSettings } from './executor-settings'
 import path from 'node:path'
 import os from 'node:os'
 import { app } from 'electron'
 import { HttpTransport } from '@maestrly/client-sdk'
 import {
-  ClaudeAgentExecutor,
-  CodexExecutor,
   RunnerEngine,
   RunnerJournal,
   WorkspaceManager,
-  RuntimeCatalog,
   ContainerCommandRunner,
   inspectRepositories,
   type ApprovedRepository,
-  type ExecutorAdapter,
   type DeliveryArtifact,
   type ExecutionArtifact,
   type RunnerClaim,
@@ -27,8 +22,11 @@ import { secureGet, secureSet, secureRemove } from '../secure-store'
 import { platformConnections } from './connection-service'
 import { platformProjectBindings } from './project-bindings'
 
+const boundedFetch:typeof fetch=(input,init)=>fetch(input,{...init,signal:init?.signal?AbortSignal.any([init.signal,AbortSignal.timeout(15000)]):AbortSignal.timeout(15000)})
+
 interface MachineIdentity {
   organizationId: string
+  mode: 'personal' | 'team'
   ownerUserId: string
   runnerId: string
   credential: string
@@ -40,9 +38,9 @@ class DesktopRunnerServer implements RunnerServer {
     url: string,
     private readonly identity: MachineIdentity,
     private readonly repositories: ApprovedRepository[],
-    private readonly catalog: RuntimeCatalog
+    private readonly catalog: DesktopModelCatalog
   ) {
-    this.transport = new HttpTransport({ baseUrl: url })
+    this.transport = new HttpTransport({ baseUrl: url,fetch:boundedFetch })
   }
   private headers() {
     return {
@@ -62,18 +60,24 @@ class DesktopRunnerServer implements RunnerServer {
     if (
       claim &&
       (claim.envelope.organizationId !== this.identity.organizationId ||
-        claim.envelope.snapshot.personalDevice?.deviceId !== this.identity.runnerId ||
-        claim.envelope.snapshot.personalDevice?.ownerUserId !== this.identity.ownerUserId)
+        (this.identity.mode === 'personal' &&
+          (claim.envelope.snapshot.personalDevice?.deviceId !== this.identity.runnerId ||
+            claim.envelope.snapshot.personalDevice?.ownerUserId !== this.identity.ownerUserId)) ||
+        (this.identity.mode === 'team' && !!claim.envelope.snapshot.personalDevice))
     )
-      throw new Error('This computer accepts only personal executions requested by its owner.')
+      throw new Error('This computer accepts only personal owner jobs in personal mode and shared jobs in team mode.')
     return claim
   }
   presence(online: boolean) {
-    return this.transport.request<{ enabled: boolean }>('POST', '/api/v1/personal-devices/presence', {
-      body: { online },
-      headers: this.headers(),
-      signal: AbortSignal.timeout(5000),
-    })
+    return this.transport.request<{ enabled: boolean }>(
+      'POST',
+      this.identity.mode === 'personal' ? '/api/v1/personal-devices/presence' : '/api/v1/runners/presence',
+      {
+        body: { online },
+        headers: this.headers(),
+        signal: AbortSignal.timeout(5000),
+      }
+    )
   }
   renew(runId: string, leaseId: string) {
     return this.transport.request<{ leaseExpiresAt: string; cancellationRequested: boolean }>(
@@ -125,132 +129,122 @@ class DesktopRunnerServer implements RunnerServer {
 }
 
 export class EmbeddedRunnerHost {
-  private revision = 0
-  private server: DesktopRunnerServer | null = null
-  private heartbeat: ReturnType<typeof setInterval> | null = null
-  private pinging = false
   private engine: RunnerEngine | null = null
+  private server: DesktopRunnerServer | null = null
+  private loop: Promise<void> | null = null
   private state: EmbeddedRunnerView = { state: 'stopped' }
   private stopping = false
-  private loop: Promise<void> | null = null
-  private readonly memoryIdentities = new Map<string, MachineIdentity>()
+  private revision = 0
+  private heartbeat: ReturnType<typeof setInterval> | null = null
+  private memory = new Map<string, MachineIdentity>()
   status(): EmbeddedRunnerView {
     return { ...this.state }
   }
-
   async start(connectionId: string): Promise<EmbeddedRunnerView> {
-    if (this.state.state === 'error' && this.engine) await this.stop()
+    if (this.state.state === 'error') await this.stop()
     if (this.engine || this.state.state === 'starting') return this.status()
+    let credentialKey: string | undefined
     const revision = ++this.revision
     this.state = { state: 'starting' }
     try {
-      const connection = platformConnections.list().find((item) => item.id === connectionId)
-      const humanToken = platformConnections.token(connectionId)
-      if (!connection || !humanToken) throw new Error('Connect to the platform before enabling the embedded runner.')
-      const connectionBindings = platformProjectBindings.list().filter((item) => item.connectionId === connectionId)
-      const binding = connectionBindings.at(-1)
-      if (!binding) throw new Error('Bind a remote project to a local workspace before enabling this machine.')
-      const bindings = connectionBindings.filter((item) => item.organizationId === binding.organizationId)
-      const projectIds = [...new Set(bindings.map((item) => item.projectId))].sort()
+      const settings = executorSettings()
+      if (!settings.providerIds.length) throw new Error('Select provider accounts in the executor settings first.')
+      const connection = platformConnections.list().find((c) => c.id === connectionId)
+      const token = await platformConnections.authenticatedToken(connectionId)
+      if (!connection || !token) throw new Error('Connect to the platform before enabling this executor.')
+      const available = platformProjectBindings.list().filter((b) => b.connectionId === connectionId),
+        organizationId = available.at(-1)?.organizationId
+      if (!organizationId) throw new Error('Bind a project to a local workspace before enabling this executor.')
+      const bindings = available.filter((b) => b.organizationId === organizationId),
+        projectIds = [...new Set(bindings.map((b) => b.projectId))].sort()
       const repositories: ApprovedRepository[] = []
-      for (const item of bindings) {
-        if (!item.repositoryBindingId) continue
-        const workspace = getWorkspace(item.workspaceId)
+      for (const binding of bindings) {
+        if (!binding.repositoryBindingId) continue
+        const workspace = getWorkspace(binding.workspaceId)
         if (!workspace) throw new Error('The bound local workspace no longer exists.')
-        const prior = repositories.find((repo) => repo.bindingId === item.repositoryBindingId)
-        if (prior && prior.localPath !== workspace.path)
+        const existing = repositories.find((r) => r.bindingId === binding.repositoryBindingId)
+        if (existing && existing.localPath !== workspace.path)
           throw new Error('A repository binding must identify one local checkout on this runner.')
-        if (!prior) repositories.push({ bindingId: item.repositoryBindingId, localPath: workspace.path })
+        if (!existing) repositories.push({ bindingId: binding.repositoryBindingId, localPath: workspace.path })
       }
-      const manager = new WorkspaceManager({ repositories, isolated: true })
-      const inventory = await manager.inventory()
-      if (inventory.some((r) => !r.available))
+      const manager = new WorkspaceManager({
+        repositories,
+        isolated: true,
+        retainWorkspace: true,
+        baseDirectory: path.join(app.getPath('userData'), 'executor-workspaces'),
+      })
+      if ((await manager.inventory()).some((r) => !r.available))
         throw new Error('The bound repository has no available committed branch. Check the local workspace.')
       const human = new HttpTransport({
         baseUrl: connection.url,
-        authentication: { headers: () => ({ authorization: `Bearer ${humanToken}` }) },
+        fetch:boundedFetch,
+        authentication: { headers: () => ({ authorization: `Bearer ${token}` }) },
       })
       const owner = await human.request<{ userId: string }>('GET', '/api/v1/me')
-      if (!owner?.userId) throw new Error('Sign in to the platform before enabling personal execution.')
-      const identityKey = `platform.personal-device.v1.${connection.id}.${owner.userId}.${binding.organizationId}`
-      let identity: MachineIdentity | null = this.memoryIdentities.get(identityKey) ?? null
+      const key = `platform.desktop-executor.${settings.mode}.${connection.id}.${owner.userId}.${organizationId}.${projectIds.join(',')}`
+      credentialKey = key
+      let identity = this.memory.get(key) ?? null
       try {
-        const stored = secureGet(identityKey)
-        if (stored) identity = JSON.parse(stored) as MachineIdentity
+        const value = secureGet(key)
+        if (value) identity = JSON.parse(value)
       } catch {
-        /* Use an explicit enrollment when no protected identity exists. */
+        /* Explicitly enroll when no protected identity exists. */
       }
-      if (identity?.ownerUserId !== owner.userId) identity = null
-      try {
+      if (settings.mode === 'personal') {
         const enrolled = await human.request<{ runnerId: string; credential?: string; ownerUserId: string }>(
           'POST',
           '/api/v1/personal-devices',
           {
             body: {
-              organizationId: binding.organizationId,
+              organizationId,
               projectIds,
-              name: os.hostname().slice(0, 160),
+              name: os.hostname(),
               ...(identity ? { deviceId: identity.runnerId } : {}),
             },
             idempotencyKey: crypto.randomUUID(),
           }
         )
-        if (enrolled.ownerUserId !== owner.userId)
-          throw new Error('Personal device owner did not match the signed-in account.')
         identity = {
-          organizationId: binding.organizationId,
+          organizationId,
           runnerId: enrolled.runnerId,
-          ownerUserId: owner.userId,
           credential: enrolled.credential ?? identity?.credential ?? '',
+          ownerUserId: owner.userId,
+          mode: 'personal',
         }
-        if (!identity.credential) throw new Error('Personal device credential is missing.')
-      } catch (error) {
-        if ((error as { status?: number }).status === 403) {
-          secureRemove(identityKey)
-          this.memoryIdentities.delete(identityKey)
+      } else {
+        // Validate the signed-in operator's project grants even when a machine credential is reused.
+        const enrollment = await human.request<{ token: string }>('POST', '/api/v1/runner-enrollments', {
+          body: { organizationId, projectIds },
+          idempotencyKey: crypto.randomUUID(),
+        })
+        if (!identity) {
+          const enrolled = await human.request<{ runnerId: string; credential: string }>(
+            'POST',
+            '/api/v1/runners/enroll',
+            {
+              body: {
+                organizationId,
+                token: enrollment.token,
+                name: os.hostname() + ' · Maestrly',
+                protocolVersion: '1.0',
+                maxConcurrency: 1,
+                capabilities: [{ name: 'executor:maestrly' }, { name: 'delivery:patch' }],
+              },
+            }
+          )
+          identity = { organizationId, ...enrolled, ownerUserId: owner.userId, mode: 'team' }
         }
-        throw error
       }
-      if (!secureSet(identityKey, JSON.stringify(identity))) this.memoryIdentities.set(identityKey, identity)
-      let codexExecutable: string | undefined
-      try {
-        codexExecutable = (
-          app.isPackaged
-            ? resolveCodexRuntime({ managedAssetPath: (await readyRuntimeAsset('codex-runtime')).path })
-            : resolveCodexRuntime()
-        ).executablePath
-      } catch {
-        /* Catalog will report an unavailable executor. */
-      }
-      const commandRunner = new ContainerCommandRunner(
+      if (!identity?.credential) throw new Error('Executor credential is missing.')
+      if (!secureSet(key, JSON.stringify(identity))) this.memory.set(key, identity)
+      const commands = new ContainerCommandRunner(
         process.env.MAESTRLY_COMMAND_IMAGE ?? 'maestrly/runner-executor:local'
       )
-      const claudeExecutable=resolveClaude()
-      const catalog = new RuntimeCatalog({
-        claudeExecutable,
-        codexExecutable,
-        environment: {
-          ...(process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {}),
-          ...(process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {}),
-        },
-        preCommandsAvailable: () => commandRunner.available(),
-      })
-      const executors = new Map<string, ExecutorAdapter>([
-        [
-          'codex',
-          new CodexExecutor({
-            executable: codexExecutable,
-            extraEnvironment: process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {},
-          }),
-        ],
-        [
-          'claude-agent',
-          new ClaudeAgentExecutor({
-            executable:claudeExecutable,
-            environment: process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {},
-          }),
-        ],
-      ])
+      const catalog = new DesktopModelCatalog(settings, () =>
+        settings.allowCommands ? commands.available() : Promise.resolve(false)
+      )
+      if (!(await catalog.read()).models.length)
+        throw new Error('No models are available from the selected accounts. Connect an account and refresh the list.')
       const server = new DesktopRunnerServer(connection.url, identity, repositories, catalog)
       if (revision !== this.revision) {
         await server.presence(false).catch(() => {})
@@ -259,10 +253,10 @@ export class EmbeddedRunnerHost {
       this.server = server
       const engine = new RunnerEngine(
         server,
-        executors,
+        new Map([['maestrly', new DesktopChatExecutor(catalog, settings, bindings)]]),
         manager,
-        new RunnerJournal(path.join(app.getPath('userData'), `platform-personal-${identity.runnerId}-journal.json`)),
-        { commandRunner }
+        new RunnerJournal(path.join(app.getPath('userData'), `platform-executor-${identity.runnerId}.json`)),
+        { commandRunner: commands }
       )
       await engine.recover()
       if (revision !== this.revision) {
@@ -271,84 +265,69 @@ export class EmbeddedRunnerHost {
       }
       this.engine = engine
       this.stopping = false
-      this.state = this.memoryIdentities.has(identityKey)
-        ? {
-            state: 'running',
-            deviceId: identity.runnerId,
-            ownerUserId: owner.userId,
-            error: 'Device identity is held in memory only because secure storage is unavailable.',
-          }
-        : { state: 'running', deviceId: identity.runnerId, ownerUserId: owner.userId }
-      this.heartbeat = setInterval(() => {
-        if (this.pinging || this.stopping) return
-        this.pinging = true
-        void server
-          .presence(true)
-          .then((result) => {
-            if (!result.enabled) {
-              this.stopping = true
-              this.state = { state: 'error', error: 'Personal execution was disabled.' }
-              if (this.heartbeat) clearInterval(this.heartbeat)
-              void engine.stop('Personal execution was disabled.')
-            }
-          })
-          .catch((error) => {
-            if ([401, 403].includes((error as { status: number }).status)) {
-              this.stopping = true
-              this.state = { state: 'error', error: 'Personal device was revoked.' }
-              if (this.heartbeat) clearInterval(this.heartbeat)
-              void engine.stop('Personal device was revoked.')
-            }
-          })
-          .finally(() => {
-            this.pinging = false
-          })
-      }, 15000)
+      this.state = {
+        state: 'running',
+        deviceId: identity.runnerId,
+        ownerUserId: identity.ownerUserId,
+        mode: settings.mode,
+      }
+      saveExecutorSettings({ ...settings, connectionId })
+      this.heartbeat = setInterval(
+        () =>
+          void server
+            .presence(true)
+            .then((result) => {
+              if (!result.enabled) void this.stop()
+            })
+            .catch((error) => {
+              if ([401, 403].includes((error as { status: number }).status)) {
+                this.state = { state: 'error', error: 'Executor access was revoked.' }
+                this.stopping = true
+                if (this.heartbeat) clearInterval(this.heartbeat)
+                secureRemove(key)
+                this.memory.delete(key)
+                void engine.stop()
+              }
+            }),
+        15000
+      )
       this.loop = this.runLoop(engine)
     } catch (error) {
-      if (revision === this.revision)
-        this.state = { state: 'error', error: error instanceof Error ? error.message : String(error) }
+      if (credentialKey && [401, 403].includes((error as { status: number }).status)) {
+        secureRemove(credentialKey)
+        this.memory.delete(credentialKey)
+      }
+      await this.server?.presence(false).catch(() => {})
+      this.server = null
+      if (revision === this.revision) this.state = { state: 'error', error: (error as Error).message }
     }
     return this.status()
   }
-
-  private async runLoop(engine: RunnerEngine): Promise<void> {
+  private async runLoop(engine: RunnerEngine) {
     try {
       while (!this.stopping) {
-        let worked: boolean
         try {
-          worked = await engine.runOnce()
+          await engine.runOnce()
         } catch (error) {
           const status = (error as { status?: number }).status
-          if (!(error instanceof TypeError) && status !== 408 && status !== 429 && !(status && status >= 500))
-            throw error
-          if (this.stopping) break
-          await new Promise((resolve) => setTimeout(resolve, 2000))
-          continue
+          if (!(error instanceof TypeError) && (error as Error).name!=='TimeoutError' && !(status && status >= 500)) throw error
         }
-        if (!worked) await new Promise((resolve) => setTimeout(resolve, 2_000))
+        if (!this.stopping) await new Promise((r) => setTimeout(r, 2000))
       }
     } catch (error) {
-      if (!this.stopping) this.state = { state: 'error', error: error instanceof Error ? error.message : String(error) }
+      this.state = { state: 'error', error: (error as Error).message }
       if (this.heartbeat) clearInterval(this.heartbeat)
+      await this.server?.presence(false).catch(() => {})
     }
   }
-
-  async stop(): Promise<void> {
+  async stop() {
     this.revision++
+    this.stopping = true
     if (this.heartbeat) clearInterval(this.heartbeat)
     this.heartbeat = null
-    const server = this.server
+    const offline = this.server?.presence(false).catch(() => {})
     this.server = null
-    const offline = server?.presence(false).catch(() => {})
-    if (!this.engine) {
-      await offline
-      this.state = { state: 'stopped' }
-      return
-    }
-    this.state = { state: 'stopping' }
-    this.stopping = true
-    await this.engine.stop('Desktop application is closing.')
+    await this.engine?.stop('Executor was stopped.')
     await this.loop
     await offline
     this.engine = null
@@ -356,5 +335,4 @@ export class EmbeddedRunnerHost {
     this.state = { state: 'stopped' }
   }
 }
-
 export const embeddedRunnerHost = new EmbeddedRunnerHost()

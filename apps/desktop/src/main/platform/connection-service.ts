@@ -22,26 +22,33 @@ const CONNECTIONS_KEY = 'platform.connections.v1'
 
 export class PlatformConnectionService {
   private readonly states = new Map<string, PlatformConnectionView>()
+  private readonly refreshing = new Map<string, Promise<string>>()
   private readonly pending = new Map<string, PendingAuthorization>()
-  constructor(private readonly credentials = new PlatformCredentialStore()) {
+  private loaded=false
+  constructor(private readonly credentials = new PlatformCredentialStore()) {}
+  private ensureLoaded():void {
+    if(this.loaded)return
+    this.loaded=true
     for (const connection of this.storedConnections()) {
-      const credential = credentials.get(connection.id)
+      const credential = this.credentials.get(connection.id)
       this.states.set(connection.id, {
         ...connection,
-        state: credential ? 'disconnected' : 'disconnected',
+        state: credential ? 'connected' : 'disconnected',
         identity: credential?.userId
           ? { userId: credential.userId, ...(credential.email ? { email: credential.email } : {}) }
           : null,
-        credentialPersistence: credential ? (credentials.mode() === 'secure' ? 'secure' : 'memory') : 'none',
+        credentialPersistence: credential ? (this.credentials.mode() === 'secure' ? 'secure' : 'memory') : 'none',
       })
     }
   }
 
   list(): PlatformConnectionView[] {
+    this.ensureLoaded()
     return [...this.states.values()]
   }
 
   async add(url: string): Promise<PlatformConnectionView> {
+    this.ensureLoaded()
     const parsedUrl = new URL(url)
     const loopback =
       parsedUrl.hostname === '127.0.0.1' || parsedUrl.hostname === 'localhost' || parsedUrl.hostname === '::1'
@@ -148,6 +155,7 @@ export class PlatformConnectionService {
       authentication: { headers: () => ({ authorization: `Bearer ${body.access_token}` }) },
     }).request<{ userId: string; email?: string }>('GET', '/api/v1/me')
     const persistence = this.credentials.set(connectionId, {
+      clientId: pending.clientId,
       accessToken: body.access_token,
       ...(typeof body.refresh_token === 'string' ? { refreshToken: body.refresh_token } : {}),
       expiresAt: Date.now() + Number(body.expires_in ?? 3600) * 1_000,
@@ -178,9 +186,54 @@ export class PlatformConnectionService {
     return this.credentials.get(connectionId)?.accessToken ?? null
   }
 
+  async authenticatedToken(connectionId: string): Promise<string | null> {
+    const credential = this.credentials.get(connectionId),
+      connection = this.required(connectionId)
+    if (!credential) return null
+    if (credential.expiresAt > Date.now() + 60000) {
+      connection.state = 'connected'
+      return credential.accessToken
+    }
+    const refreshToken=credential.refreshToken
+    if (!refreshToken) throw new Error('Sign in to the platform again.')
+    const pending = this.refreshing.get(connectionId)
+    if (pending) return pending
+    const refresh = (async () => {
+      const response = await fetch(connection.url + '/api/auth/oauth2/token', {
+        signal:AbortSignal.timeout(15000),
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          client_id: credential.clientId ?? connection.desktopClientId ?? '',
+        }),
+      })
+      if (!response.ok) throw new Error('Platform authorization expired. Sign in again.')
+      const result = (await response.json()) as { access_token: string; refresh_token?: string; expires_in: number }
+      if (typeof result.access_token !== 'string' || !result.access_token || !Number.isFinite(result.expires_in))
+        throw new Error('Invalid platform authorization response.')
+      if (this.credentials.get(connectionId)?.accessToken !== credential.accessToken)
+        throw new Error('Platform account changed while authorization was refreshing.')
+      this.credentials.set(connectionId, {
+        ...credential,
+        accessToken: result.access_token,
+        refreshToken: result.refresh_token ?? credential.refreshToken,
+        expiresAt: Date.now() + result.expires_in * 1000,
+      })
+      connection.state = 'connected'
+      return result.access_token
+    })()
+    this.refreshing.set(connectionId, refresh)
+    try {
+      return await refresh
+    } finally {
+      if (this.refreshing.get(connectionId) === refresh) this.refreshing.delete(connectionId)
+    }
+  }
   async listProjects(connectionId: string): Promise<RemotePlatformProject[]> {
     const connection = this.required(connectionId)
-    const token = this.token(connectionId)
+    const token = await this.authenticatedToken(connectionId)
     if (!token) throw new Error('Connect to the platform first.')
     const transport = new HttpTransport({
       baseUrl: connection.url,
@@ -199,6 +252,10 @@ export class PlatformConnectionService {
             organizationName: organization.name,
             projectId: project.id,
             projectName: project.name,
+            repositories: await transport.request<Array<{ id: string; name: string; baseBranch?: string }>>(
+              'GET',
+              `/api/v1/organizations/${organization.id}/projects/${project.id}/repositories`
+            ),
             boards: await transport.request<Array<{ id: string; name: string }>>(
               'GET',
               `/api/v1/organizations/${organization.id}/projects/${project.id}/boards`
@@ -211,6 +268,7 @@ export class PlatformConnectionService {
   }
 
   private required(id: string) {
+    this.ensureLoaded()
     const connection = this.states.get(id)
     if (!connection) throw new Error('Platform connection not found.')
     return connection

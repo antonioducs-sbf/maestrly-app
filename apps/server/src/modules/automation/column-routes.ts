@@ -95,7 +95,7 @@ export function registerColumnAutomationRoutes(app: FastifyInstance, pool: Datab
   route('GET', '/projects/:projectId/automation-catalog', z.object({}), (s) =>
     transaction(pool, s, async (client) => {
       await authorizeProject(client, s.organizationId, s.projectId, s.userId, 'project:read')
-      return { runners: await projectCatalog(client, s.organizationId, s.projectId) }
+      return { runners: await projectCatalog(client, s.organizationId, s.projectId, s.userId) }
     })
   )
   route(

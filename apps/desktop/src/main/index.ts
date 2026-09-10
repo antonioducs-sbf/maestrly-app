@@ -1,3 +1,4 @@
+import {executorSettings,recoverDesktopExecutions} from './platform/executor-settings'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -6,6 +7,7 @@ import {
   dialog,
   ipcMain,
   Menu,
+  Tray,
   nativeImage,
   nativeTheme,
   session,
@@ -484,6 +486,7 @@ async function createWindow(): Promise<void> {
   initTerminalManager(mainWindow)
 
   mainWindow.on('close', (e) => {
+    if(executorSettings().background&&!backgroundQuit){e.preventDefault();mainWindow?.hide();return}
     if (!confirmQuitOnce(() => e.preventDefault())) return
 
     floatingManager.flushPendingFloatPersists()
@@ -704,8 +707,20 @@ app.whenReady().then(async () => {
 
   if (mainWindow) void initAppImageIntegration(mainWindow)
 
+  const trayIcon=nativeImage.createFromPath(path.join(__dirname,'../../resources/icon.png')).resize({width:18,height:18})
+  if(!trayIcon.isEmpty()){
+    trayIcon.setTemplateImage(true)
+    executorTray=new Tray(trayIcon)
+    executorTray.setToolTip('Maestrly')
+    const reveal=()=>{if(mainWindow&&!mainWindow.isDestroyed()){mainWindow.show();mainWindow.focus();mainWindow.webContents.send('executor:open')}else void createWindow()}
+    executorTray.on('click',reveal)
+    executorTray.setContextMenu(Menu.buildFromTemplate([{label:'Maestrly',click:reveal},{label:getLocale().startsWith('pt')?'Pausar executor':'Pause executor',click:()=>void embeddedRunnerHost.stop()},{type:'separator'},{label:getLocale().startsWith('pt')?'Sair':'Quit',click:()=>app.quit()}]))
+  }
+  recoverDesktopExecutions()
+  const executor=executorSettings()
+  if(executor.autoStart&&executor.connectionId)void embeddedRunnerHost.start(executor.connectionId)
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if(mainWindow&&!mainWindow.isDestroyed()){mainWindow.show();mainWindow.focus()}else void createWindow()
   })
 })
 
@@ -754,6 +769,8 @@ let chatDisposing = false
 let platformRunnerStopped = false
 let platformRunnerStopping = false
 
+let executorTray:Tray|null=null
+let backgroundQuit=false
 let quitConfirmed = false
 let quitDialogOpen = false
 
@@ -771,7 +788,7 @@ function confirmQuitOnce(preventDefault: () => void): boolean {
   quitDialogOpen = true
   void confirmQuit()
     .then((ok) => {
-      if (!ok) return
+      if (!ok) {backgroundQuit=false;return}
       quitConfirmed = true
       app.quit()
     })
@@ -783,6 +800,7 @@ function confirmQuitOnce(preventDefault: () => void): boolean {
 
 // Wait for project cleanup, provider runtime teardown, and pending local memory writes before exiting.
 app.on('before-quit', (e) => {
+  backgroundQuit=true
   if (!confirmQuitOnce(() => e.preventDefault())) return
 
   if (!projectSetupsFlushed && cancelProjectSetupsAndWait) {

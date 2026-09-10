@@ -30,12 +30,19 @@ export interface PlatformProjectBinding {
   repositoryBindingId?: string
 }
 
-export interface EmbeddedRunnerView { deviceId?:string;ownerUserId?:string; state: 'stopped' | 'starting' | 'running' | 'stopping' | 'error'; error?: string }
+export interface EmbeddedRunnerView { mode?:'personal'|'team'; deviceId?:string;ownerUserId?:string; state: 'stopped' | 'starting' | 'running' | 'stopping' | 'error'; error?: string }
 
 export interface RemotePlatformProject {
   organizationId: string
   organizationName: string
   projectId: string
   projectName: string
+  repositories?:Array<{id:string;name:string;baseBranch?:string}>
   boards: Array<{ id: string; name: string }>
 }
+
+export interface DesktopExecutorSettings {
+ mode:'personal'|'team';background:boolean;autoStart:boolean;connectionId?:string;providerIds:string[];
+ allowCommands:boolean;allowWeb:boolean;allowAppTools:boolean;allowMcp:boolean;allowPush:boolean;skills:boolean;
+}
+export interface DesktopExecutionRecord {runId:string;cardId:string;title:string;conversationId:string;workspacePath:string;state:string;startedAt:number;summary?:string}

@@ -1,3 +1,4 @@
+import { autonomousPolicy,assertAutonomousPermission } from './autonomous'
 /**
  * BYOK chat tool permission broker. Faithfully ported without Effect from opencode `permission.ts`
  * + `permission/saved.ts` + `util/wildcard.ts`.
@@ -236,6 +237,8 @@ export class PermissionBroker extends EventEmitter {
    */
   async assertDecision(input: AssertInput): Promise<'once' | 'always'> {
     if (input.signal?.aborted) throw new PermissionCancelledError()
+    const autonomous=autonomousPolicy(input.conversationId)
+    if(autonomous){assertAutonomousPermission(autonomous,input);return 'once'}
     const r = this.evaluateInput(input)
     if (r.effect === 'deny') throw new DeniedError(r.rules)
     if (r.effect === 'allow') return 'once'

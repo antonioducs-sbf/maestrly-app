@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   PROTOCOL_VERSION,
+  effectiveAutomation,columnAutomationSchema,
   apiErrorSchema,
   cardSchema,
   executionEnvelopeSchema,
@@ -52,3 +53,12 @@ describe('public protocol', () => {
       .toBe('PROTOCOL_INCOMPATIBLE')
   })
 })
+
+ it('desktop automations run unattended while other approval policies remain explicit',()=>{
+  const config=columnAutomationSchema.parse({provider:'maestrly',model:'desktop-model'})
+  expect(effectiveAutomation(config,null).approvalRequired).toBe(false)
+  const manual=columnAutomationSchema.parse({provider:'codex',model:'codex-model'})
+  expect(effectiveAutomation(manual,null).approvalRequired).toBe(true)
+  expect(effectiveAutomation(manual,{provider:'maestrly',model:'desktop-model'}).approvalRequired).toBe(false)
+  expect(effectiveAutomation(manual,null).provider).toBe('codex')
+ })

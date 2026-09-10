@@ -77,7 +77,7 @@ export function AutomationPanel({
                 </p>
                 {policy && !fixed ? (
                   <p>
-                    {policy.provider === 'codex' ? 'Codex' : 'Claude Agent SDK'} · {policy.model}
+                    {policy.provider === 'codex' ? 'Codex' : policy.provider === 'maestrly' ? 'Maestrly' : 'Claude Agent SDK'} · {policy.model}
                     {config?.effort ? ' · ' + t(config.effort) : ''}
                     {config?.fastMode ? ' · Fast' : ''}
                     {config?.mode === 'maestro' ? ' · Maestro' : ''}

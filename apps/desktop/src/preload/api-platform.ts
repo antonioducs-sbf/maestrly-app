@@ -1,7 +1,13 @@
 import { ipcRenderer } from 'electron'
-import type { DeviceAuthorizationView, EmbeddedRunnerView, PlatformConnectionView, PlatformProjectBinding, RemotePlatformProject } from '../shared/platform'
+import type { DesktopExecutorSettings, DesktopExecutionRecord, DeviceAuthorizationView, EmbeddedRunnerView, PlatformConnectionView, PlatformProjectBinding, RemotePlatformProject } from '../shared/platform'
 
 export const platformApi = {
+  onExecutorOpen:(callback:()=>void):(()=>void)=>{const listener=()=>callback();ipcRenderer.on('executor:open',listener);return()=>ipcRenderer.removeListener('executor:open',listener)},
+  platformExecutorSettings:():Promise<DesktopExecutorSettings>=>ipcRenderer.invoke('platform:executor-settings'),
+  platformSaveExecutorSettings:(settings:DesktopExecutorSettings):Promise<DesktopExecutorSettings>=>ipcRenderer.invoke('platform:executor-save',settings),
+  platformExecutorProviders:():Promise<Array<{id:string;name:string;models:string[]}>>=>ipcRenderer.invoke('platform:executor-providers'),
+  platformExecutorHistory:():Promise<DesktopExecutionRecord[]>=>ipcRenderer.invoke('platform:executor-history'),
+  platformOpenExecutorConversation:(id:string):Promise<void>=>ipcRenderer.invoke('platform:executor-open',id),
   platformListConnections: (): Promise<PlatformConnectionView[]> => ipcRenderer.invoke('platform:list-connections'),
   platformAddConnection: (url: string): Promise<PlatformConnectionView> => ipcRenderer.invoke('platform:add-connection', url),
   platformBeginDeviceAuthorization: (connectionId: string, clientId: string): Promise<DeviceAuthorizationView> => ipcRenderer.invoke('platform:begin-device-auth', connectionId, clientId),

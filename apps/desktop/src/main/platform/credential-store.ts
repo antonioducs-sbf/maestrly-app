@@ -1,6 +1,7 @@
 import { secureGet, secureRemove, secureSet, secureStorageMode } from '../secure-store'
 
 export interface PlatformCredential {
+  clientId?: string
   accessToken: string
   refreshToken?: string
   expiresAt: number
@@ -15,11 +16,18 @@ export class PlatformCredentialStore {
     if (memory) return memory
     const stored = secureGet(`platform.credential.${connectionId}`)
     if (!stored) return null
-    try { return JSON.parse(stored) as PlatformCredential } catch { return null }
+    try {
+      return JSON.parse(stored) as PlatformCredential
+    } catch {
+      return null
+    }
   }
 
   set(connectionId: string, credential: PlatformCredential): 'secure' | 'memory' {
-    if (secureSet(`platform.credential.${connectionId}`, JSON.stringify(credential))) return 'secure'
+    if (secureSet(`platform.credential.${connectionId}`, JSON.stringify(credential))) {
+      this.memory.delete(connectionId)
+      return 'secure'
+    }
     this.memory.set(connectionId, credential)
     return 'memory'
   }
@@ -29,5 +37,7 @@ export class PlatformCredentialStore {
     secureRemove(`platform.credential.${connectionId}`)
   }
 
-  mode(): 'secure' | 'unavailable' { return secureStorageMode() }
+  mode(): 'secure' | 'unavailable' {
+    return secureStorageMode()
+  }
 }

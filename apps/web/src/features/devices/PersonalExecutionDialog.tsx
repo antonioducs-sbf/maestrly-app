@@ -177,7 +177,7 @@ export function PersonalExecutionDialog({
           {!preview.config.enabled ? <p>{t('The agent is disabled for this column.')}</p> : null}
           <div className="personal-preview">
             <p>
-              {preview.effective.provider === 'codex' ? 'Codex' : 'Claude Agent SDK'} · {preview.effective.model} ·{' '}
+              {preview.effective.provider === 'codex' ? 'Codex' : preview.effective.provider === 'maestrly' ? 'Maestrly' : 'Claude Agent SDK'} · {preview.effective.model} ·{' '}
               {t(preview.effective.mode)}
             </p>
             <Markdown value={preview.renderedPrompt} />

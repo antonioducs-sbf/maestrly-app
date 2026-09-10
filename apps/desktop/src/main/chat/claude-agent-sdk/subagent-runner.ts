@@ -37,6 +37,7 @@ const FORBIDDEN_CHILD_TOOLS = new Set([
   'task',
   'delegate',
   'review_plan',
+  'executor_report',
   'ask_question',
   'todo_write',
   'wait_delegation',

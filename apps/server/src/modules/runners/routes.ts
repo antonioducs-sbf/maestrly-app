@@ -51,6 +51,15 @@ export function registerRunnerRoutes(app: FastifyInstance, pool: DatabasePool, a
     return reply.status(201).send(await enrollRunner(pool, body))
   })
 
+  app.post('/api/v1/runners/presence',async request=>{
+    const identity=runnerIdentity(request),body=z.object({online:z.boolean()}).strict().parse(request.body)
+    if(!await verifyRunnerCredential(pool,identity))throw Object.assign(new Error('Runner credential is invalid or revoked.'),{statusCode:401})
+    return inTenantTransaction(pool,{organizationId:identity.organizationId,actor:{type:'runner',runnerId:identity.runnerId}},async client=>{
+      const updated=await client.query("update runners set status=case when $2 then 'online' else 'offline' end,last_seen_at=case when $2 then now() else null end where id=$1 and owner_user_id is null and status<>'revoked'",[identity.runnerId,body.online])
+      return {enabled:updated.rowCount===1}
+    })
+  })
+
   app.post('/api/v1/runners/claim', async (request) => {
     const identity = runnerIdentity(request)
     const body=z.object({automationCapabilities:runnerAutomationCapabilitiesSchema.optional(),repositories:z.array(z.object({bindingId:opaqueIdSchema,available:z.boolean(),branches:z.array(z.string().min(1).max(250)).max(500),error:z.string().max(500).optional()}).strict()).max(100).default([])}).strict().parse(request.body ?? {})

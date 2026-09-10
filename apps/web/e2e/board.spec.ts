@@ -31,11 +31,11 @@ test('creates and moves work with a keyboard-accessible alternative', async ({ p
   await page.screenshot({ path: 'test-results/platform-board.png', fullPage: true })
   const other = testInfo.project.name === 'en' ? 'pt-BR' : 'en'
   await page.getByRole('combobox', { name: L('Language') }).click()
-  await page.getByRole('option', {name: other === 'en' ? 'English' : 'Português (Brasil)', exact:true}).click()
+  await page.getByRole('option', {name: other === 'en' ? 'English' : 'Português', exact:true}).click()
   await expect(page.getByRole('heading', { name: translate('Board', other), level:2, exact: true })).toBeVisible()
   await expect(page.getByRole('button', {name: 'Verify release evidence', exact:true})).toBeVisible()
   await page.getByRole('combobox', { name: translate('Language', other) }).click()
-  await page.getByRole('option', {name: testInfo.project.name === 'en' ? 'English' : 'Português (Brasil)', exact:true}).click()
+  await page.getByRole('option', {name: testInfo.project.name === 'en' ? 'English' : 'Português', exact:true}).click()
   for (const width of [1440,390]) {
     await page.setViewportSize({width,height:900})
     await page.screenshot({path:'/tmp/maestrly-board-i18n-'+testInfo.project.name+'-'+width+'.png'})

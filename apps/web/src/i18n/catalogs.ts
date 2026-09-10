@@ -648,7 +648,12 @@ export const en = {
   "Password changed successfully.": "Password changed successfully.",
   "Invalid password": "Invalid password",
   "Password too short": "Password too short",
-  "Password too long": "Password too long"
+  "Password too long": "Password too long",
+  "This model is available on your personal computer. Use Run on my computer on the card.": "This model is available on your personal computer. Use Run on my computer on the card.",
+  "Execution conversation": "Execution conversation",
+  "Task": "Task",
+  "Conversation messages will appear here when the desktop executor starts.": "Conversation messages will appear here when the desktop executor starts.",
+  "Connect provider accounts and select them in the desktop executor settings.": "Connect provider accounts and select them in the desktop executor settings."
 } as const
 export const ptBR: Record<keyof typeof en, string> = {
   "Work moves forward. You stay in control.": "O trabalho avança. Você mantém o controle.",
@@ -1300,5 +1305,10 @@ export const ptBR: Record<keyof typeof en, string> = {
   "Password changed successfully.": "Senha alterada com sucesso.",
   "Invalid password": "Senha atual incorreta.",
   "Password too short": "A senha é muito curta.",
-  "Password too long": "A senha é muito longa."
+  "Password too long": "A senha é muito longa.",
+  "This model is available on your personal computer. Use Run on my computer on the card.": "Este modelo está disponível no seu computador pessoal. Use Executar no meu computador no card.",
+  "Execution conversation": "Conversa da execução",
+  "Task": "Tarefa",
+  "Conversation messages will appear here when the desktop executor starts.": "As mensagens aparecerão aqui quando o executor Maestrly iniciar.",
+  "Connect provider accounts and select them in the desktop executor settings.": "Conecte as contas dos provedores e selecione-as nas configurações do executor Maestrly."
 }

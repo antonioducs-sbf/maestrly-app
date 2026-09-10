@@ -67,17 +67,18 @@ export async function currentConfig(client: DatabaseClient, column: ColumnConfig
   const policy = rows?.rows[0]
   return { policy, config: configFromPolicy(policy) }
 }
-export async function projectCatalog(client: DatabaseClient, organizationId: string, projectId: string) {
+export async function projectCatalog(client: DatabaseClient, organizationId: string, projectId: string, ownerUserId?:string) {
   const rows = await client.query(
     `select r.id,r.name,r.status,r.last_seen_at as "lastSeenAt",r.repositories,
     r.automation_capabilities as capabilities from runners r join runner_project_bindings b
     on b.runner_id=r.id and b.organization_id=r.organization_id where b.organization_id=$1 and b.project_id=$2 and r.status<>'revoked' and r.owner_user_id is null`,
     [organizationId, projectId]
   )
-  return rows.rows.map((row) => {
+  const shared = rows.rows.map((row) => {
     const parsed = runnerAutomationCapabilitiesSchema.safeParse(row.capabilities)
     return { ...row, capabilities: parsed.success ? parsed.data : null }
   })
+  return ownerUserId ? [...shared,...(await personalDeviceRows(client,organizationId,projectId,ownerUserId)).filter(r=>r.enabled).map(r=>({...r,personal:true}))] : shared
 }
 export async function resolvedRepository(
   client: DatabaseClient,
@@ -192,7 +193,7 @@ export async function saveColumnAutomation(
     const repository = config.enabled
       ? await resolvedRepository(client, scope.organizationId, column.project_id, config)
       : { repositoryBindingId: null }
-    const catalog = await projectCatalog(client, scope.organizationId, column.project_id)
+    const catalog = await projectCatalog(client, scope.organizationId, column.project_id, !config.autoRun&&config.runnerSelector==='pool'?scope.userId:undefined)
     if (config.enabled) {
       if (!config.model.trim()) fail('Select an available model.', 400)
       if (!catalog.some((row) => assessAutomationRunner(row, config, repository, false).compatible))
@@ -343,7 +344,7 @@ export async function saveCardOverride(
     const effective = effectiveAutomation(current.config, scope.config)
     if (current.config.enabled && scope.config) {
       const repository = await resolvedRepository(client, scope.organizationId, card.project_id, effective)
-      const runners = await projectCatalog(client, scope.organizationId, card.project_id)
+      const runners = await projectCatalog(client, scope.organizationId, card.project_id, !effective.autoRun&&effective.runnerSelector==='pool'?scope.userId:undefined)
       if (!runners.some((row) => assessAutomationRunner(row, effective, repository, false).compatible))
         fail('No runner supports this configuration.')
     }

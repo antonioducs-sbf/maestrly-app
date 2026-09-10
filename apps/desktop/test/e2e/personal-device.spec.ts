@@ -1,10 +1,13 @@
+import {createServer,type Server} from 'node:http'
+import {columnAutomationSchema} from '@maestrly/protocol'
 import { test, expect, _electron as electron } from '@playwright/test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type {
+  DesktopExecutorSettings,DesktopExecutionRecord,
   PlatformConnectionView,
   DeviceAuthorizationView,
   EmbeddedRunnerView,
@@ -13,11 +16,17 @@ import type {
 
 declare const window: {
   api: {
+    platformExecutorSettings():Promise<DesktopExecutorSettings>
+    platformSaveExecutorSettings(value:DesktopExecutorSettings):Promise<DesktopExecutorSettings>
+    platformExecutorHistory():Promise<DesktopExecutionRecord[]>
+    platformOpenExecutorConversation(id:string):Promise<void>
+    chatAddProvider(input:{name:string;baseURL:string;key:string;kind:'openai'}):Promise<{id?:string;ok:boolean}>
     addWorkspace(dir: string): Promise<{ id: string }>
     platformAddConnection(url: string): Promise<PlatformConnectionView>
     platformBeginDeviceAuthorization(id: string, clientId: string): Promise<DeviceAuthorizationView>
     platformPollDeviceAuthorization(id: string): Promise<PlatformConnectionView>
     platformSetProjectBinding(binding: PlatformProjectBinding): Promise<void>
+    platformRunnerStatus():Promise<EmbeddedRunnerView>
     platformRunnerStart(id: string): Promise<EmbeddedRunnerView>
     platformRunnerStop(): Promise<void>
     platformDisconnect(id: string): Promise<PlatformConnectionView>
@@ -32,7 +41,26 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
   const root = await mkdtemp(path.join(os.tmpdir(), 'maestrly-personal-desktop-')),
     server = process.env.MAESTRLY_SERVER_URL!
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined
+  let modelServer:Server|undefined
+  const modelRequests:any[]=[]
+  let holdModel=false,heldRequests=0
   try {
+    modelServer=createServer(async(req,res)=>{
+      if(req.url==='/v1/models'){res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[{id:'executor-fixture',object:'model'}]}));return}
+      if(req.url!=='/v1/chat/completions'){res.writeHead(404).end();return}
+      let body='';for await(const chunk of req)body+=chunk
+      const input=JSON.parse(body);modelRequests.push(input)
+      if(holdModel){heldRequests++;return}
+      const written=input.messages.some((m:any)=>m.role==='tool')
+      res.setHeader('content-type','text/event-stream')
+      const chunk=(delta:unknown,finish_reason:string|null=null)=>res.write('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',created:0,model:'executor-fixture',choices:[{index:0,delta,finish_reason}]})+'\n\n')
+      if(!written){chunk({role:'assistant',tool_calls:[{index:0,id:'write-fixture',type:'function',function:{name:'write',arguments:JSON.stringify({path:'executor-proof.txt',content:'Verified desktop execution.\n'})}}]});chunk({},'tool_calls')}
+      else if(!input.messages.some((m:any)=>m.role==='tool'&&m.tool_call_id==='report-fixture')){chunk({role:'assistant',tool_calls:[{index:0,id:'report-fixture',type:'function',function:{name:'executor_report',arguments:JSON.stringify({state:'succeeded',summary:'Created executor-proof.txt and verified the tool result.'})}}]});chunk({},'tool_calls')}
+      else{chunk({role:'assistant',content:'Created executor-proof.txt through the full Maestrly chat engine. Verified the tool result.'});chunk({},'stop')}
+      res.end('data: [DONE]\n\n')
+    })
+    await new Promise<void>(resolve=>modelServer!.listen(0,'127.0.0.1',resolve))
+    const modelPort=(modelServer.address() as {port:number}).port
     const signedIn = await request.post(server + '/api/auth/sign-in/email', {
       data: { email: process.env.MAESTRLY_E2E_EMAIL, password: process.env.MAESTRLY_E2E_PASSWORD },
     })
@@ -59,8 +87,8 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
       '-qm',
       'Fixture',
     ])
-    app = await electron.launch({
-      args: [path.join(desktop, 'out/main/index.js')],
+    const launch=()=>electron.launch({
+      ...(process.env.MAESTRLY_PACKAGED_EXECUTABLE ? {executablePath:process.env.MAESTRLY_PACKAGED_EXECUTABLE,args:['--use-mock-keychain']} : {args:[path.join(desktop,'out/main/index.js')]}),
       env: {
         ...process.env,
         AGENTS_E2E: '1',
@@ -73,7 +101,8 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
         ANTHROPIC_API_KEY: '',
       },
     })
-    const page = await app.firstWindow()
+    app=await launch()
+    let page = await app.firstWindow()
     await page.getByRole('button', { name: 'Skip', exact: true }).click()
     const connection = await page.evaluate((url) => window.api.platformAddConnection(url), server)
     expect(connection.desktopClientId).toBe('maestrly-desktop-personal-v1')
@@ -99,6 +128,15 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
       projectId: created.project.id,
       boardId: created.boardId,
     })
+    const provider=await page.evaluate(baseURL=>window.api.chatAddProvider({name:'Local executor fixture',baseURL,key:'fixture-key',kind:'openai'}),'http://127.0.0.1:'+modelPort+'/v1')
+    expect(provider.ok).toBe(true)
+    await page.getByTitle('Settings').click()
+    await page.getByRole('button',{name:/Platform/}).click()
+    await expect(page.getByText('Maestrly executor',{exact:true})).toBeVisible()
+    await page.getByLabel(/Local executor fixture/).check()
+    await page.getByLabel('Continue in background when the window is closed',{exact:true}).check()
+    await page.getByRole('button',{name:'Start executor',exact:true}).click()
+    await expect(page.getByRole('button',{name:'Pause executor',exact:true})).toBeVisible()
     const state = await page.evaluate((id) => window.api.platformRunnerStart(id), connection.id)
     expect(state.state, state.error).toBe('running')
     expect(state.deviceId).toBeTruthy()
@@ -120,19 +158,64 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
       )
     ).json()
     expect(shared).toEqual([])
-    await page.getByTitle('Settings').click()
-    // The platform tab already exists; new controls clearly describe personal ownership.
-    await page.getByRole('button', { name: /Platform/ }).click()
-    await expect(page.getByText('Enable personal execution on this computer', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button',{name:'Pause executor',exact:true})).toBeVisible()
     await page.screenshot({ path: info.outputPath('personal-desktop-en.png') })
     await page.evaluate(() => window.api.setLocale('pt-BR'))
-    await expect(page.getByText('Habilitar execução pessoal neste computador', { exact: true })).toBeVisible()
+    await expect(page.getByText('Executor Maestrly', { exact: true })).toBeVisible()
     await page.screenshot({ path: info.outputPath('personal-desktop-pt.png') })
+    // Submit a real card. The operator's one-time configuration is the only approval.
+    const call=async(method:'get'|'put'|'post',url:string,data?:unknown)=>{
+      const response=await request[method](server+url,{headers:{...headers,'idempotency-key':crypto.randomUUID()},data})
+      expect(response.ok(),await response.text()).toBe(true);return response.json()
+    }
+    let device:any
+    await expect.poll(async()=>{device=(await call('get','/api/v1/organizations/'+organizationId+'/projects/'+created.project.id+'/personal-devices'))[0];return device?.capabilities?.models?.length??device?.automationCapabilities?.models?.length??0},{timeout:30000}).toBeGreaterThan(0)
+    const catalog=device.capabilities??device.automationCapabilities
+    const board=await call('get','/api/v1/organizations/'+organizationId+'/boards/'+created.boardId),column=board.columns[1]
+    const config=columnAutomationSchema.parse({enabled:true,provider:'maestrly',model:catalog.models[0].model,taskType:'analysis',approvalRequired:true})
+    const policy=await call('put','/api/v1/organizations/'+organizationId+'/columns/'+column.id+'/automation',{expectedPolicyId:null,config})
+    const card=await call('post','/api/v1/organizations/'+organizationId+'/boards/'+created.boardId+'/cards',{columnId:column.id,title:'Desktop executor proof'})
+    await call('post','/api/v1/organizations/'+organizationId+'/cards/'+card.id+'/automation/run',{expectedVersion:card.version,expectedPolicyId:policy.policyId,expectedOverrideVersion:0,personalDeviceId:state.deviceId})
+    await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.close())
+    expect(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.isVisible())).toBe(false)
+    let detail:any
+    await expect.poll(async()=>{detail=await call('get','/api/v1/organizations/'+organizationId+'/cards/'+card.id);return detail.attempts[0]?.state},{timeout:60000}).toBe('succeeded')
+    const history=await page.evaluate(()=>window.api.platformExecutorHistory())
+    expect(history[0]).toMatchObject({title:'Desktop executor proof',state:'succeeded'})
+    expect(await readFile(path.join(history[0]!.workspacePath,'executor-proof.txt'),'utf8')).toBe('Verified desktop execution.\n')
+    expect(modelRequests.length).toBeGreaterThanOrEqual(2)
+    expect(modelRequests[0].tools.some((t:any)=>/ask_question|review_plan|request_user_input/.test(t.function.name))).toBe(false)
+    expect(JSON.stringify(modelRequests[0].messages)).toContain('No person is available')
+    const events=await call('get','/api/v1/organizations/'+organizationId+'/cards/'+card.id+'/execution-events?runId='+detail.attempts[0].id)
+    expect(events.items.some((e:any)=>e.type==='maestrly.message'&&e.data.text.includes('Created executor-proof'))).toBe(true)
+    expect(detail.requests).toEqual([])
+    await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.show())
+    await page.evaluate(id=>window.api.platformOpenExecutorConversation(id),history[0]!.conversationId)
+    await page.screenshot({path:info.outputPath('desktop-executor-conversation.png')})
+    holdModel=true
+    const cancelCard=await call('post','/api/v1/organizations/'+organizationId+'/boards/'+created.boardId+'/cards',{columnId:column.id,title:'Cancel desktop executor'})
+    await call('post','/api/v1/organizations/'+organizationId+'/cards/'+cancelCard.id+'/automation/run',{expectedVersion:cancelCard.version,expectedPolicyId:policy.policyId,expectedOverrideVersion:0,personalDeviceId:state.deviceId})
+    await expect.poll(()=>heldRequests,{timeout:30000}).toBe(1)
+    await page.evaluate(()=>window.api.platformRunnerStop())
+    await expect.poll(async()=>(await call('get','/api/v1/organizations/'+organizationId+'/cards/'+cancelCard.id)).attempts[0]?.state).toBe('cancelled')
+    expect((await page.evaluate(()=>window.api.platformExecutorHistory()))[0]).toMatchObject({state:'cancelled'})
+    holdModel=false
+    await page.evaluate(async()=>window.api.platformSaveExecutorSettings({...await window.api.platformExecutorSettings(),autoStart:true}))
+    await app.close();app=await launch();page=await app.firstWindow()
+    await expect.poll(async()=>{const state=await page.evaluate(()=>window.api.platformRunnerStatus());return state.error??state.state},{timeout:30000}).toBe('running')
+    await page.evaluate(async()=>window.api.platformSaveExecutorSettings({...await window.api.platformExecutorSettings(),mode:'team',autoStart:false}))
+    const teamState=await page.evaluate(id=>window.api.platformRunnerStart(id),connection.id)
+    expect(teamState.state,teamState.error).toBe('running');expect(teamState.mode).toBe('team')
+    await expect.poll(async()=>{const runners=await call('get','/api/v1/organizations/'+organizationId+'/projects/'+created.project.id+'/automation-catalog');return runners.runners.some((r:any)=>r.id===teamState.deviceId&&r.capabilities?.models.length)},{timeout:30000}).toBe(true)
+    const teamCard=await call('post','/api/v1/organizations/'+organizationId+'/boards/'+created.boardId+'/cards',{columnId:column.id,title:'Team desktop proof'})
+    await call('post','/api/v1/organizations/'+organizationId+'/cards/'+teamCard.id+'/automation/run',{expectedVersion:teamCard.version,expectedPolicyId:policy.policyId,expectedOverrideVersion:0})
+    await expect.poll(async()=>(await call('get','/api/v1/organizations/'+organizationId+'/cards/'+teamCard.id)).attempts[0]?.state,{timeout:30000}).toBe('succeeded')
     await page.evaluate((id) => window.api.platformDisconnect(id), connection.id)
     const stopped = await (await request.get(devicesUrl, { headers })).json()
     expect(stopped[0]).toMatchObject({ online: false, enabled: false })
   } finally {
     await app?.close()
+    if(modelServer)await new Promise<void>(resolve=>modelServer!.close(()=>resolve()))
     await rm(root, { recursive: true, force: true })
   }
 })

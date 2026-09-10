@@ -1,3 +1,4 @@
+import {autonomousProviderAllowed} from './autonomous'
 import type { ChatModelMeta } from '../../shared/chat'
 import type { SubagentProfileModelMetaResult } from '../../shared/subagent-profile-effort'
 import type { SubagentProfileModelCatalogResult } from '../../shared/subagent-profiles'
@@ -121,6 +122,7 @@ async function authenticatedGrokModels(accountId: string | null): Promise<readon
 }
 
 export async function subagentProviderStatus(providerId: string): Promise<SubagentProviderStatus> {
+  if (!autonomousProviderAllowed(providerId)) return 'unsupported'
   if (!getProvider(providerId)) return 'missing'
   const accountId = subscriptionAccountId(providerId)
   if (isGitHubCopilotSubscriptionProvider(providerId)) {

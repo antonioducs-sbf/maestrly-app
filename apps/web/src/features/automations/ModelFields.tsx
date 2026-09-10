@@ -2,6 +2,7 @@ import type { ColumnAutomation, RunnerAutomationCapabilities } from '@maestrly/p
 import { Select } from '../../components/Select.js'
 import { t } from '../../i18n/index.js'
 export interface CatalogRunner {
+  personal?:boolean
   id: string
   name: string
   status: string
@@ -41,10 +42,10 @@ export function ModelFields({
           label={t('Provider')}
           options={(providers.length ? providers : [config.provider]).map((value) => ({
             value,
-            label: value === 'codex' ? 'Codex' : 'Claude Agent SDK',
+            label: value === 'codex' ? 'Codex' : value === 'maestrly' ? 'Maestrly' : 'Claude Agent SDK',
           }))}
           onChange={(value) =>
-            update({ provider: value as ColumnAutomation['provider'], model: '', effort: null, fastMode: false })
+            update({ provider: value as ColumnAutomation['provider'], model: '', effort: null, fastMode: false, ...(value === 'maestrly' ? { approvalRequired: false } : {}) })
           }
         />
       </div>
@@ -59,7 +60,7 @@ export function ModelFields({
             ...distinct.map((m) => ({ value: m.model, label: m.label })),
             ...(invalid ? [{ value: config.model, label: t('Unavailable') + ' · ' + config.model }] : []),
           ]}
-          onChange={(model) => update({ model, effort: null, fastMode: false })}
+          onChange={(model) => update({ model, effort: null, fastMode: false, ...(!runners.some(r=>!r.personal&&r.capabilities?.models.some(m=>m.provider===config.provider&&m.model===model))?{autoRun:false}: {}) })}
         />
       </div>
       {efforts.length ? (

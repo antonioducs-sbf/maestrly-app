@@ -1,3 +1,4 @@
+import {governAutonomousTools,autonomousPolicy,AUTONOMOUS_INSTRUCTIONS} from '../autonomous'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
   SDKCompactBoundaryMessage,
@@ -557,7 +558,7 @@ async function prepareRuntime(
   ) {
     enabledBuiltins.add(GENERATE_IMAGE_TOOL_NAME)
   }
-  const core = buildTools({ enabled: enabledBuiltins, makeCtx: makeContext })
+  const core = buildTools({executorReport:true, enabled: enabledBuiltins, makeCtx: makeContext })
   const gate = (toolName: string, toolCallId: string, signal?: AbortSignal) => {
     return args.broker.assert({
       conversationId: args.conversationId,
@@ -698,6 +699,7 @@ async function prepareRuntime(
         })
       : {}
     const tools: ToolSet = { ...hostTools, ...taskTools, ...supervisionTools }
+    governAutonomousTools(tools, args.conversationId)
     const bridge = await buildClaudeToolBridge(
       tools,
       args.signal,
@@ -753,6 +755,7 @@ async function prepareRuntime(
       args.mode === 'maestro' && args.maestro ? renderMaestroTurnPolicy(args.maestro) : '',
       ultra ? `# Ultra mode\n${ultra}` : '',
       behaviorProfile ? '' : `# Environment\n${env}`,
+      autonomousPolicy(args.conversationId) ? AUTONOMOUS_INSTRUCTIONS : '',
     ]
       .filter(Boolean)
       .join('\n\n')

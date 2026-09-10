@@ -142,7 +142,7 @@ export class RunnerEngine {
       let outcome: ExecutionOutcome
       if (cancelled) outcome = { state: 'cancelled', failure: cancelled }
       else {
-        handle = await startOrchestration(adapter, context)
+        handle = await (adapter.managesOrchestration?adapter.start(context):startOrchestration(adapter, context))
         if (cancelled) await handle.cancel(cancelled)
         outcome = await handle.done
       }

@@ -47,6 +47,8 @@ export interface ExecutorCapabilities {
 }
 
 export interface ExecutorAdapter {
+  managesOrchestration?:boolean
+
   capabilities(): Promise<ExecutorCapabilities>
   start(context: ExecutionContext): Promise<ExecutionHandle>
 }

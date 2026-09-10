@@ -1,3 +1,4 @@
+import {withAutonomousPolicy} from '../../src/main/chat/autonomous'
 import { describe, expect, it, vi } from 'vitest'
 import {
   CodexAppServerRpcError,
@@ -92,6 +93,12 @@ function harness(message = 'Rate limit reached') {
 }
 
 describe('Codex subagent quota classification', () => {
+  it('keeps unattended children on host-governed tools without native human prompts or account plugins',async()=>{
+    const {client,args}=harness()
+    await withAutonomousPolicy({cwd:'/workspace',allowCommands:false,allowWeb:false,allowAppTools:true,allowMcp:false,allowPush:false},()=>runCodexSubagent(args).catch(()=>undefined))
+    expect(client.startThread).toHaveBeenCalledWith(expect.objectContaining({config:expect.objectContaining({'features.shell_tool':false,web_search:'disabled','features.default_mode_request_user_input':false,'features.apps':false,'features.plugins':false,'skills.include_instructions':false})}),expect.anything())
+  })
+
   it.each([
     { label: 'enveloped', response: { rateLimits: { primary: { usedPercent: 100 } } } },
     { label: 'direct', response: { primary: { usedPercent: 100 } } },

@@ -268,6 +268,13 @@ export function DesktopApp() {
     chatGptVisibleConversationId,
   })
   const { statuses, attention, acknowledgeConversation } = agents
+  useEffect(()=>{
+    let mounted=true
+    const unsubscribe=window.api.onExecutorOpen(()=>openSettings('platform'))
+    void window.api.platformExecutorSettings().then(settings=>{if(mounted&&settings.mode==='team')openSettings('platform')}).catch(()=>{})
+    return ()=>{mounted=false;unsubscribe()}
+  },[openSettings])
+
   const handleSidebarConversationSelect = useCallback(
     (conv: Conversation) => {
       acknowledgeConversation(conv.id)

@@ -114,6 +114,7 @@ export function AutomationEditor({
   const selectedRunners = runners.filter((r) => config.runnerSelector !== 'runner' || r.id === config.targetRunnerId)
   const models = catalogModels(runners, config.runnerSelector === 'runner' ? config.targetRunnerId : null)
   const modelValid = models.some((m) => modelSupports(config, m))
+  const canAutoRun = catalogModels(runners.filter(r=>!r.personal),config.runnerSelector==='runner'?config.targetRunnerId:null).some(m=>modelSupports(config,m))
   const canMaestro = selectedRunners.some((r) => r.capabilities?.maestro)
   const canSubagents = selectedRunners.some((r) => r.capabilities?.subagents)
   const canCommands = selectedRunners.some((r) => r.capabilities?.preCommands)
@@ -177,7 +178,7 @@ export function AutomationEditor({
                 <input
                   type="checkbox"
                   checked={config.autoRun}
-                  disabled={!config.enabled}
+                  disabled={!config.enabled||!canAutoRun}
                   onChange={(e) => update({ autoRun: e.target.checked })}
                 />
                 {t('Run automatically on entry')}
@@ -185,7 +186,8 @@ export function AutomationEditor({
               <label className="check">
                 <input
                   type="checkbox"
-                  checked={config.approvalRequired}
+                  checked={config.provider !== 'maestrly' && config.approvalRequired}
+                  disabled={config.provider === 'maestrly'}
                   onChange={(e) => update({ approvalRequired: e.target.checked })}
                 />
                 {t('Require approval before claim')}
@@ -216,12 +218,13 @@ export function AutomationEditor({
                     onChange={(targetRunnerId) => update({ targetRunnerId: targetRunnerId || null })}
                     options={[
                       { value: '', label: t('Select a runner') },
-                      ...runners.map((r) => ({ value: r.id, label: r.name + ' · ' + t(r.status) })),
+                      ...runners.filter(r=>!r.personal).map((r) => ({ value: r.id, label: r.name + ' · ' + t(r.status) })),
                     ]}
                   />
                 </div>
               ) : null}
               <ModelFields config={config} update={update} runners={runners} disabled={busy} />
+              {modelValid&&!canAutoRun?<p className="form-note automation-wide">{t('This model is available on your personal computer. Use Run on my computer on the card.')}</p>:null}
               <div className="select-field">
                 {t('Execution mode')}
                 <Select

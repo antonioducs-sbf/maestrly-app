@@ -1,3 +1,4 @@
+import { autonomousPolicy,interactiveTool,AUTONOMOUS_INSTRUCTIONS,withAutonomousPolicy } from '../autonomous'
 import { createHash, randomUUID } from 'node:crypto'
 import { asSchema } from '@ai-sdk/provider-utils'
 import { jsonSchema, tool, type Tool, type ToolSet } from 'ai'
@@ -1808,7 +1809,7 @@ async function buildDynamicTools(
       bridgeNames.add(GENERATE_IMAGE_TOOL_NAME)
     }
     const bridgeTools = bridgeNames.size
-      ? buildTools({
+      ? buildTools({executorReport:true,
           enabled: bridgeNames,
           makeCtx: (toolCallId, signal): ToolContext => ({
             conversationId: args.conversationId,
@@ -1973,6 +1974,9 @@ async function buildDynamicTools(
         },
       })
     }
+    if(autonomousPolicy(args.conversationId))for(let i=runtimes.length-1;i>=0;i--){if(interactiveTool(runtimes[i].spec.name))runtimes.splice(i,1)}
+    const policy=autonomousPolicy(args.conversationId)
+    if(policy)for(const runtime of runtimes){const execute=runtime.execute;runtime.execute=(...args)=>withAutonomousPolicy(policy,()=>execute(...args))}
     runtimes.sort((a, b) => a.spec.name.localeCompare(b.spec.name))
     return {
       runtimes,
@@ -2458,7 +2462,7 @@ export async function runCodexSubscriptionChat(
           conversationId: args.conversationId,
           maestro: args.maestro,
         })
-    return (profile.isAstra ? astraDeveloperInstructions(base, profile) : base) + projectContext
+    return (profile.isAstra ? astraDeveloperInstructions(base, profile) : base) + projectContext + (autonomousPolicy(args.conversationId) ? "\n\n"+AUTONOMOUS_INSTRUCTIONS : "")
   }
   let developerInstructions = developerInstructionsFor(runtimeProfile)
   const structuralInstructionHash = (): string =>
@@ -2519,6 +2523,7 @@ export async function runCodexSubscriptionChat(
     // Default modes used by Agent/Ask without duplicating it as a dynamic tool.
     config: {
       ...DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG,
+      ...(autonomousPolicy(args.conversationId)?{'features.default_mode_request_user_input':false,'features.apps':false,'features.plugins':false,'features.tool_suggest':false}:{}),
       ...(runtimeProfile.nativeCompactionFirst ? {} : ROOT_THREAD_NATIVE_AUTO_COMPACTION_CONFIG),
       ...(runtimeProfile.experimentalContextEnabled
         ? { 'features.context_management.experimental_mode': true }
@@ -3294,7 +3299,7 @@ export async function runCodexSubscriptionChat(
             })
             const inheritedChildTools = Object.fromEntries(
               Object.entries(childToolSet(signal, supportsImages)).filter(
-                ([name]) => args.mode !== 'maestro' || name !== 'use_skill'
+                ([name]) => name!=='executor_report' && (args.mode !== 'maestro' || name !== 'use_skill')
               )
             ) as ToolSet
             const childTools: ToolSet = sessionRecorder.instrumentTools({

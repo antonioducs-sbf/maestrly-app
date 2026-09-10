@@ -1,3 +1,4 @@
+import { autonomousPolicy,AutonomousInteractionError } from './autonomous'
 /**
  * Broker for ask_question options and free-text answers, following the PermissionBroker pattern.
  * Tool execution calls ask() and waits on a deferred promise until the user answers the chat card
@@ -31,6 +32,7 @@ export class QuestionBroker extends EventEmitter {
   /** Called by ask_question execution. Wait for an answer, or resolve [] on dismissal/abort.
    *  Emit 'asked' to mark the conversation as needing attention (asking status, sound and badge). */
   ask(input: AskInput): Promise<string[][]> {
+    if(autonomousPolicy(input.conversationId))return Promise.reject(new AutonomousInteractionError())
     if (input.signal?.aborted) return Promise.resolve([])
     let entry!: Pending
     let cancel = (): void => {}

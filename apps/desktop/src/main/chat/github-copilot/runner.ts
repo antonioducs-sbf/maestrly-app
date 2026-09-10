@@ -1,3 +1,4 @@
+import {governAutonomousTools,autonomousPolicy,AUTONOMOUS_INSTRUCTIONS} from '../autonomous'
 import { createHash, randomUUID } from 'node:crypto'
 import { jsonSchema, tool, type ToolSet } from 'ai'
 import type {
@@ -514,7 +515,7 @@ async function prepareRuntime(
   ) {
     enabledBuiltins.add(GENERATE_IMAGE_TOOL_NAME)
   }
-  const core = buildTools({ enabled: enabledBuiltins, makeCtx: makeContext })
+  const core = buildTools({executorReport:true, enabled: enabledBuiltins, makeCtx: makeContext })
   const gate = (toolName: string, toolCallId: string, signal?: AbortSignal) => {
     return args.broker.assert({
       conversationId: args.conversationId,
@@ -651,6 +652,7 @@ async function prepareRuntime(
       ...taskTools,
       ...supervisionTools,
     })
+    governAutonomousTools(combinedRuntime.tools, args.conversationId)
     const adaptedRuntime = adaptToolSetForModel({
       tools: combinedRuntime.tools,
       supportsImages: !args.dropImages,
@@ -735,7 +737,7 @@ async function prepareRuntime(
       agents,
       toolSignature: signature,
       availableTools,
-      systemMessage,
+      systemMessage: systemMessage + (autonomousPolicy(args.conversationId) ? "\n\n"+AUTONOMOUS_INSTRUCTIONS : ""),
       ...(behaviorProfile ? { behaviorProfile } : {}),
       takeToolOutput: (toolCallId) => {
         const output = canonicalToolOutputs.get(toolCallId)

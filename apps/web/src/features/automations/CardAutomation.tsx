@@ -164,7 +164,7 @@ export function CardAutomation({
                       { value: '', label: t('Inherit from column') },
                       ...[...new Set(catalogModels(runners, null).map((m) => m.provider))].map((value) => ({
                         value,
-                        label: value === 'codex' ? 'Codex' : 'Claude Agent SDK',
+                        label: value === 'codex' ? 'Codex' : value === 'maestrly' ? 'Maestrly' : 'Claude Agent SDK',
                       })),
                     ]}
                   />

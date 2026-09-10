@@ -1,3 +1,4 @@
+import { autonomousPolicy,AutonomousInteractionError } from './chat/autonomous'
 import * as windowIpc from './window-ipc'
 import { getLocale } from './store'
 import { tFor } from './i18n'
@@ -122,6 +123,7 @@ export function initPlanBroker(onReceived?: (agentId: string) => void): void {
 
 /** Stage a plan, replacing a still-pending earlier version. */
 function registerPlan(input: PlanSubmitInput): PlanSubmitResult {
+  if(autonomousPolicy(input.agentId))throw new AutonomousInteractionError()
   const origin: PlanOrigin = input.origin ?? { kind: 'maestrly-chat' }
   const reservation = revisionReservations.get(input.agentId)
   if (reservation && reservation.originKind !== origin.kind) {

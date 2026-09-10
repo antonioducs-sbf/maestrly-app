@@ -8,7 +8,7 @@ describe.skipIf(!integrationAvailable)('migrations', () => {
     const pool = migrationPool()
     try {
       const result = await pool.query<{ count: string }>('select count(*)::text as count from schema_migrations')
-      expect(Number(result.rows[0]!.count)).toBe(7)
+      expect(Number(result.rows[0]!.count)).toBe(8)
     } finally { await pool.end() }
   })
 })

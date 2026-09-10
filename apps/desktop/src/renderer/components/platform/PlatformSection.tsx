@@ -1,7 +1,13 @@
+import { ExecutorSection } from './ExecutorSection'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ExternalLink, Link2, Server, Unplug } from 'lucide-react'
-import type { DeviceAuthorizationView, PlatformConnectionView, RemotePlatformProject } from '../../../shared/platform'
+import type {
+  DeviceAuthorizationView,
+  PlatformConnectionView,
+  RemotePlatformProject,
+  PlatformProjectBinding,
+} from '../../../shared/platform'
 import { Button } from '../ui/button'
 
 export function PlatformSection() {
@@ -12,25 +18,21 @@ export function PlatformSection() {
   const [clientId, setClientId] = useState('')
   const [authorization, setAuthorization] = useState<DeviceAuthorizationView | null>(null)
   const [error, setError] = useState('')
-  const [runner, setRunner] = useState<Awaited<ReturnType<typeof window.api.platformRunnerStatus>> | null>(null)
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string }>>([])
   const [remoteProjects, setRemoteProjects] = useState<RemotePlatformProject[]>([])
   const [workspaceId, setWorkspaceId] = useState('')
   const [remoteProjectId, setRemoteProjectId] = useState('')
   const [repositoryBindingId, setRepositoryBindingId] = useState('')
-  const [cardId, setCardId] = useState('')
+  const [bindings, setBindings] = useState<PlatformProjectBinding[]>([])
+  const [saved, setSaved] = useState(false)
   const reload = () => window.api.platformListConnections().then(setConnections)
   useEffect(() => {
     void reload()
-    void window.api.platformRunnerStatus().then(setRunner)
+    void window.api.platformListProjectBindings().then(setBindings)
     void window.api.listWorkspaces().then((items) => {
       setWorkspaces(items)
       setWorkspaceId(items[0]?.id ?? '')
     })
-  }, [])
-  useEffect(() => {
-    const timer = setInterval(() => void window.api.platformRunnerStatus().then(setRunner), 3000)
-    return () => clearInterval(timer)
   }, [])
   useEffect(() => {
     const connection = connections.find((item) => item.state === 'connected')
@@ -117,10 +119,10 @@ export function PlatformSection() {
       projectId: project.projectId,
       boardId: board.id,
       ...(repositoryBindingId.trim() ? { repositoryBindingId: repositoryBindingId.trim() } : {}),
-      ...(cardId.trim() ? { cardId: cardId.trim() } : {}),
     })
-    setRunner({ state: 'stopped' })
     setError('')
+    setSaved(true)
+    setBindings(await window.api.platformListProjectBindings())
   }
 
   return (
@@ -128,9 +130,12 @@ export function PlatformSection() {
       <header className="flex items-center gap-3">
         <Server className="size-5 text-muted-foreground" />
         <div>
-          <h2 className="text-sm font-semibold">Platform connections</h2>
+          <h2 className="text-sm font-semibold">{L('Kanban connection', 'Conexão com o Kanban')}</h2>
           <p className="text-xs text-muted-foreground">
-            Optional. Local conversations and tools continue to work while disconnected.
+            {L(
+              'Connect this app to your Kanban, choose a project folder, then enable the executor below.',
+              'Conecte este app ao seu Kanban, escolha a pasta do projeto e ative o executor abaixo.'
+            )}
           </p>
         </div>
       </header>
@@ -139,20 +144,25 @@ export function PlatformSection() {
           className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
           value={url}
           onChange={(event) => setUrl(event.target.value)}
-          aria-label="Instance URL"
+          aria-label={L('Instance URL', 'URL da instância')}
         />
         <Button onClick={() => void add()}>
-          <Link2 className="size-4" /> Add instance
+          <Link2 className="size-4" /> {L('Add instance', 'Adicionar instância')}
         </Button>
       </div>
-      {!connections.some((c) => c.desktopClientId) ? (
-        <input
-          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-          value={clientId}
-          onChange={(event) => setClientId(event.target.value)}
-          placeholder="Public OAuth client ID for this instance"
-          aria-label="OAuth client ID"
-        />
+      {connections.length > 0 && !connections.some((c) => c.desktopClientId) ? (
+        <details>
+          <summary className="text-xs">
+            {L('Advanced connection settings', 'Configurações avançadas de conexão')}
+          </summary>
+          <input
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+            value={clientId}
+            onChange={(event) => setClientId(event.target.value)}
+            placeholder="Public OAuth client ID for this instance"
+            aria-label="OAuth client ID"
+          />
+        </details>
       ) : null}
       <div className="space-y-2">
         {connections.map((connection) => (
@@ -172,13 +182,13 @@ export function PlatformSection() {
                 variant="ghost"
                 size="icon"
                 onClick={() => void window.api.platformDisconnect(connection.id).then(reload)}
-                title="Disconnect"
+                title={L('Disconnect', 'Desconectar')}
               >
                 <Unplug className="size-4" />
               </Button>
             ) : (
               <Button variant="outline" onClick={() => void authorize(connection.id)}>
-                <ExternalLink className="size-4" /> Connect
+                <ExternalLink className="size-4" /> {L('Connect', 'Conectar')}
               </Button>
             )}
           </article>
@@ -186,17 +196,22 @@ export function PlatformSection() {
       </div>
       {authorization ? (
         <div className="rounded-xl border border-border bg-muted/30 p-4">
-          <p className="text-xs text-muted-foreground">Confirm this exact code in your browser</p>
+          <p className="text-xs text-muted-foreground">
+            {L('Confirm this exact code in your browser', 'Confirme este código no navegador')}
+          </p>
           <strong className="my-2 block font-mono text-xl tracking-widest">{authorization.userCode}</strong>
-          <Button onClick={() => void poll()}>I approved the code</Button>
+          <Button onClick={() => void poll()}>{L('I approved the code', 'Aprovei o código')}</Button>
         </div>
       ) : null}
       {remoteProjects.length > 0 ? (
         <div className="space-y-3 rounded-xl border border-border p-3">
           <div>
-            <strong className="block text-sm">Bind project to local workspace</strong>
+            <strong className="block text-sm">{L('Project folder', 'Pasta do projeto')}</strong>
             <span className="text-xs text-muted-foreground">
-              No conversations, notes, memory, or credentials are synchronized.
+              {L(
+                'Execution conversations appear on the card. Other local conversations stay on this machine.',
+                'As conversas das execuções aparecem no card. As demais conversas locais ficam nesta máquina.'
+              )}
             </span>
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
@@ -204,7 +219,7 @@ export function PlatformSection() {
               className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
               value={workspaceId}
               onChange={(event) => setWorkspaceId(event.target.value)}
-              aria-label="Local workspace"
+              aria-label={L('Local workspace', 'Workspace local')}
             >
               {workspaces.map((workspace) => (
                 <option key={workspace.id} value={workspace.id}>
@@ -215,8 +230,12 @@ export function PlatformSection() {
             <select
               className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
               value={remoteProjectId}
-              onChange={(event) => setRemoteProjectId(event.target.value)}
-              aria-label="Remote project"
+              onChange={(event) => {
+                setRemoteProjectId(event.target.value)
+                setRepositoryBindingId('')
+                setSaved(false)
+              }}
+              aria-label={L('Remote project', 'Projeto remoto')}
             >
               {remoteProjects.map((project) => (
                 <option key={project.projectId} value={project.projectId}>
@@ -224,72 +243,74 @@ export function PlatformSection() {
                 </option>
               ))}
             </select>
-            <input
+            <select
               className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
               value={repositoryBindingId}
-              onChange={(event) => setRepositoryBindingId(event.target.value)}
-              placeholder="Approved repository binding ID (optional)"
-            />
-            <input
-              className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
-              value={cardId}
-              onChange={(event) => setCardId(event.target.value)}
-              placeholder="Card ID for board tools (optional)"
-            />
+              onChange={(e) => setRepositoryBindingId(e.target.value)}
+              aria-label="Repository"
+            >
+              <option value="">{L('No repository / analysis only', 'Sem repositório / somente análise')}</option>
+              {remoteProjects
+                .find((p) => p.projectId === remoteProjectId)
+                ?.repositories?.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} · {r.baseBranch}
+                  </option>
+                ))}
+            </select>
           </div>
-          <Button variant="outline" onClick={() => void bindProject()}>
-            Bind project
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => void bindProject().catch((e) => setError(e.message))}>
+              {L('Authorize project', 'Autorizar projeto')}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() =>
+                void (async () => {
+                  const folder = await window.api.pickFolder()
+                  if (!folder) return
+                  const workspace = await window.api.addWorkspace(folder)
+                  setWorkspaces(await window.api.listWorkspaces())
+                  setWorkspaceId(workspace.id)
+                })().catch((e) => setError(e.message))
+              }
+            >
+              {L('Choose another folder', 'Escolher outra pasta')}
+            </Button>
+          </div>
+          {saved ? (
+            <p role="status" className="text-xs text-emerald-600">
+              {L(
+                'Project authorized. You can start the executor below.',
+                'Projeto autorizado. Você pode iniciar o executor abaixo.'
+              )}
+            </p>
+          ) : null}
+          {bindings.map((b) => (
+            <div key={b.workspaceId} className="flex items-center justify-between gap-2 text-xs">
+              <span>
+                {workspaces.find((w) => w.id === b.workspaceId)?.name ?? L('Workspace', 'Workspace')} ·{' '}
+                {remoteProjects.find((p) => p.projectId === b.projectId)?.projectName ??
+                  L('Authorized project', 'Projeto autorizado')}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  void window.api
+                    .platformRemoveProjectBinding(b.workspaceId)
+                    .then(() => window.api.platformListProjectBindings())
+                    .then(setBindings)
+                    .catch((e) => setError(e.message))
+                }
+              >
+                {L('Remove authorization', 'Remover autorização')}
+              </Button>
+            </div>
+          ))}
         </div>
       ) : null}
-      <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-3">
-        <div>
-          <strong className="block text-sm">
-            {L('Enable personal execution on this computer', 'Habilitar execução pessoal neste computador')}
-          </strong>
-          <span className="text-xs text-muted-foreground">
-            {L(
-              'Only your explicit requests · Not part of the team runner pool',
-              'Somente suas solicitações explícitas · Fora do pool da equipe'
-            )}{' '}
-            · {runner?.state ?? 'stopped'}
-          </span>
-        </div>
-        {runner?.state === 'running' ? (
-          <Button
-            variant="outline"
-            onClick={() => void window.api.platformRunnerStop().then(() => setRunner({ state: 'stopped' }))}
-          >
-            {L('Disable personal execution', 'Desabilitar execução pessoal')}
-          </Button>
-        ) : (
-          <Button
-            disabled={!connections.some((item) => item.state === 'connected')}
-            onClick={() => {
-              const connection = connections.find((item) => item.state === 'connected')
-              if (connection) void window.api.platformRunnerStart(connection.id).then(setRunner)
-            }}
-          >
-            {L('Enable my computer', 'Habilitar meu computador')}
-          </Button>
-        )}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        {L(
-          'Closing or disconnecting the desktop stops personal execution. Connect the same account used in the web. Configure provider credentials on this computer; they are not sent to the server.',
-          'Fechar ou desconectar o desktop interrompe a execução pessoal. Conecte a mesma conta usada na web. Configure as credenciais dos provedores neste computador; elas não são enviadas ao servidor.'
-        )}
-      </p>
-      {runner?.deviceId ? (
-        <p className="text-xs text-muted-foreground">
-          {L('Device', 'Dispositivo')}: {runner.deviceId}
-        </p>
-      ) : null}
-      {runner?.error ? (
-        <p className="text-xs text-amber-500" role="status">
-          {runner.error}
-        </p>
-      ) : null}
+      <ExecutorSection connections={connections} />
       {error ? (
         <p className="text-xs text-destructive" role="alert">
           {error}

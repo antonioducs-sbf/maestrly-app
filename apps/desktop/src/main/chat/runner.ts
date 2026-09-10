@@ -1,3 +1,4 @@
+import { autonomousPolicy,interactiveTool,governAutonomousTools,AUTONOMOUS_INSTRUCTIONS } from './autonomous'
 /**
  * BYOK chat agent loop. Conceptually ported from opencode `session/runner/llm.ts`, which manually
  * implements multi-step tools for durability. Here Vercel AI SDK `streamText` handles the loop
@@ -661,6 +662,8 @@ export async function runChat(args: RunChatArgs): Promise<RunChatResult> {
   const hasNotesTab = Boolean(conversation)
   const enabledNames = args.reviewerRuntime ? new Set(REVIEWER_READONLY_TOOL_NAMES) : builtinToolNamesForMode(mode)
 
+  if(autonomousPolicy(conversationId))for(const name of enabledNames){if(interactiveTool(name))enabledNames.delete(name)}
+
   // Metadata must arrive before classifying `ultra`: GPT-5.6 treats it as REAL effort; older conversations
   // on models not advertising it used the same raw value as Maestrly's legacy sentinel.
   const reasoningEffort = resolveTurnReasoning(args.reasoningOverride, getConvUiPrefs(conversationId).chat?.reasoning)
@@ -789,7 +792,7 @@ export async function runChat(args: RunChatArgs): Promise<RunChatResult> {
   if (!args.reviewerRuntime && (await generateImageToolEnabled(conversationId, mode))) {
     enabledNames.add(GENERATE_IMAGE_TOOL_NAME)
   }
-  const tools = buildTools({
+  const tools = buildTools({executorReport:true,
     enabled: enabledNames,
     makeCtx: makeMainToolContext,
   })
@@ -1243,6 +1246,7 @@ export async function runChat(args: RunChatArgs): Promise<RunChatResult> {
       })
     : {}
   let allTools: ToolSet = { ...tools, ...mcp.tools, ...app.tools, ...skillTools, ...taskTools, ...supervisionTools }
+  governAutonomousTools(allTools, conversationId)
   if (useOpenAIHarness) {
     if (capabilityMode === 'agent' && !args.reviewerRuntime) {
       const nativeTools = buildOpenAINativeTools({
@@ -1676,7 +1680,7 @@ export async function runChat(args: RunChatArgs): Promise<RunChatResult> {
       : [stepCountIs(turnMaxSteps), planStop]
     const result = streamText({
       model: streamModel,
-      system,
+      system: system + (autonomousPolicy(conversationId) ? "\n\n"+AUTONOMOUS_INSTRUCTIONS : ""),
       messages,
       tools: allTools,
       stopWhen,

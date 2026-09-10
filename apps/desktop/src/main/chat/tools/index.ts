@@ -1,3 +1,4 @@
+import {autonomousReportTools} from '../autonomous-tools'
 /**
  * Tool registry + Vercel AI SDK adapter. Ported from opencode tool/registry.ts: replaces
  * Layer/Scope/WeakMap/JSON-schema generation with a simple record + `ai` `tool()` (already generates
@@ -209,7 +210,7 @@ export function selectSubagentToolNames(args: {
     for (const name of readOnlyHostNames) selected.add(name)
   }
 
-  for (const forbidden of ['task', 'delegate', 'review_plan', 'ask_question', 'todo_write']) {
+  for (const forbidden of ['task', 'delegate', 'review_plan', 'ask_question', 'todo_write', 'executor_report']) {
     selected.delete(forbidden)
   }
   if (!args.allowSkillLoader) selected.delete('use_skill')
@@ -259,6 +260,7 @@ function toAiTool(def: ToolDef<any, any>, makeCtx: (toolCallId: string, signal: 
 
 /** Builds the ToolSet for `streamText({ tools })`. */
 export function buildTools(opts: {
+  executorReport?:boolean
   enabled?: Set<string>
   makeCtx: (toolCallId: string, signal: AbortSignal) => ToolContext
 }): ToolSet {
@@ -267,5 +269,5 @@ export function buildTools(opts: {
     if (opts.enabled && !opts.enabled.has(def.name)) continue
     out[def.name] = toAiTool(def, opts.makeCtx)
   }
-  return out
+  return opts.executorReport ? {...out,...autonomousReportTools()} : out
 }

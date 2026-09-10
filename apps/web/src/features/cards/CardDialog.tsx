@@ -261,6 +261,7 @@ function CardEditor({
   return (
     <Modal title={card.title} onClose={() => void close()} wide>
       <div className="card-context">
+        <button className="quiet" onClick={()=>{window.dispatchEvent(new CustomEvent('maestrly-open-project-chat',{detail:{organizationId:card.organizationId,projectId:card.projectId,boardId:card.boardId,cardId:card.id}}));void close()}}>{t('Discuss this card')}</button>
         {card.automationBlocked?<span className="dispatch-blocked">{t('Dispatch blocked')}</span>:null}
         <span>{detail.columnName}</span>
         <span>{t(card.archivedAt ? 'Archived' : 'Open')}</span>

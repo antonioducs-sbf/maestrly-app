@@ -26,6 +26,8 @@ Commands and enabled MCPs run with this machine's access. An isolated checkout i
 
 ## Conversation visibility
 
+For an interactive conversation started in the Kanban web app, enable **Interactive project chat in the web**. This uses a separate turn queue and the normal question, permission and plan brokers; column jobs remain unattended. See [project chat](project-chat.md) for setup, privacy and recovery.
+
 **Execution conversations** in desktop settings opens the full local conversation. The card's **Executions → Execution conversation** shows the task, assistant messages and tool names/status, with a bounded transcript artifact. Raw tool inputs/outputs, internal messages and unrelated local conversations are not uploaded through this projection. Normal output can contain project information and is visible to authorized project members.
 
 Local conversation creation, tools, cancellation, background execution and transcript delivery are exercised by the real Electron/API test with a deterministic local model. Live subscription authentication, provider availability and billing require the operator's own accounts.

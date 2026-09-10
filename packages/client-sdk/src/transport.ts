@@ -39,7 +39,7 @@ export class HttpTransport {
   constructor(options: TransportOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '')
     this.authentication = options.authentication
-    this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis)
     this.protocolVersion = options.protocolVersion ?? '1.0'
   }
 

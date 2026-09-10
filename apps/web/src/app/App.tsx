@@ -5,9 +5,9 @@ import { RepositoriesPanel } from '../features/repositories/RepositoriesPanel.js
 import { BoardTabs } from '../features/boards/BoardTabs.js'
 import { t, useLocale, LanguageSelector } from '../i18n/index.js'
 import { FormDialog } from '../components/FormDialog.js'
-import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeft, FolderKanban, Languages, Cpu, Monitor } from 'lucide-react'
+import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeft, FolderKanban, Languages, Cpu, Monitor, MessageSquare } from 'lucide-react'
 import type { Project, Board } from '@maestrly/protocol'
 import { api, write } from './api.js'
 import { Login } from '../features/auth/Login.js'
@@ -22,6 +22,8 @@ import { RunnersPanel } from '../features/runners/RunnersPanel.js'
 import { OperationsPanel } from '../features/executions/OperationsPanel.js'
 import { ReportsPanel } from '../features/reports/ReportsPanel.js'
 import { EmptyState } from '../components/EmptyState.js'
+
+const ProjectChatDrawer = lazy(() => import('../features/chat/ProjectChatDrawer.js').then(m => ({default:m.ProjectChatDrawer})))
 
 interface Session {
   user: { id: string; name: string; email: string }
@@ -120,6 +122,13 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null)
   const [executions, setExecutions] = useState<Operation[]>([])
   const [view, setView] = useState<View>('board')
+  const [chatOpen,setChatOpen]=useState(false)
+  const [chatContext,setChatContext]=useState<{boardId?:string;cardId?:string}>({})
+  useEffect(()=>{
+    const open=(event:Event)=>{const detail=(event as CustomEvent).detail;if(detail?.organizationId===organizationId&&detail?.projectId===projectId){setChatContext({boardId:detail.boardId,cardId:detail.cardId});setChatOpen(true)}}
+    window.addEventListener('maestrly-open-project-chat',open)
+    return()=>window.removeEventListener('maestrly-open-project-chat',open)
+  },[organizationId,projectId])
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (localStorage.getItem('maestrly-theme') as 'light' | 'dark') ?? 'light'
   )
@@ -135,6 +144,8 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
     boardRequest.current++
     boardsRequest.current++
     setProjectId(id)
+    setChatOpen(false)
+    setChatContext({})
     setBoardId('')
     setBoards([])
     setSnapshot(null)
@@ -307,7 +318,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
   const canManage = role === 'owner' || role === 'admin' || activeProject?.currentRole === 'maintainer'
   const readOnly = activeProject?.currentRole === 'viewer' && !canManage
   return (
-    <div className={'workspace-shell '+(collapsed?'sidebar-collapsed':'sidebar-expanded')+(smallScreen&&mobileOpen?' sidebar-mobile-open':'')}>
+    <div className={'workspace-shell '+(collapsed?'sidebar-collapsed':'sidebar-expanded')+(smallScreen&&mobileOpen?' sidebar-mobile-open':'')+(chatOpen?' chat-open':'')}>
       {accountOpen?<AccountDialog user={session.user} onClose={()=>setAccountOpen(false)} onChanged={()=>setPasswordChanged(true)}/>:null}
       {creatingProject ? (
         <FormDialog
@@ -425,6 +436,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
               onReload={reloadBoards}
             />
           ) : null}
+          {projectId?<button className="quiet" aria-label={t('Project chat')} onClick={()=>{setChatContext({boardId});setChatOpen(true)}}><MessageSquare size={16}/>{t('Chat')}</button>:null}
           <div className="topbar-status">
             <span className={streamState}>
               <i />
@@ -505,6 +517,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           ) : null}
         </div>
       </main>
+      {chatOpen&&projectId?<Suspense fallback={null}><ProjectChatDrawer key={organizationId+projectId} organizationId={organizationId} projectId={projectId} projectName={activeProject?.name??''} userId={session.user.id} boardId={chatContext.boardId} cardId={chatContext.cardId} onClose={()=>setChatOpen(false)}/></Suspense>:null}
     </div>
   )
 }

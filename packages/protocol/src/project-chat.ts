@@ -8,68 +8,174 @@ const text = z.string().max(1_000_000)
 export const chatPartSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), id: key, text }).strict(),
   z.object({ type: z.literal('reasoning'), id: key, text }).strict(),
-  z.object({ type: z.literal('tool'), id: key, name: key, state: key, input: z.string().max(32768).optional(), output: z.string().max(65536).optional() }).strict(),
+  z
+    .object({
+      type: z.literal('tool'),
+      id: key,
+      name: key,
+      state: key,
+      input: z.string().max(32768).optional(),
+      output: z.string().max(65536).optional(),
+    })
+    .strict(),
 ])
-export const projectChatMessageSchema = z.object({
-  id, sessionId: id, turnId: id.nullable(), role: z.enum(['user', 'assistant']),
-  parts: z.array(chatPartSchema).max(1000), createdAt: utcDateTimeSchema,
-}).strict()
-export const chatTurnStateSchema = z.enum(['queued', 'running', 'waiting_input', 'cancelling', 'succeeded', 'failed', 'cancelled', 'interrupted'])
+export const projectChatMessageSchema = z
+  .object({
+    id,
+    sessionId: id,
+    turnId: id.nullable(),
+    role: z.enum(['user', 'assistant']),
+    parts: z.array(chatPartSchema).max(1000),
+    createdAt: utcDateTimeSchema,
+  })
+  .strict()
+export const chatTurnStateSchema = z.enum([
+  'queued',
+  'running',
+  'waiting_input',
+  'cancelling',
+  'succeeded',
+  'failed',
+  'cancelled',
+  'interrupted',
+])
 export const CHAT_ACTIVE_STATES = ['queued', 'running', 'waiting_input', 'cancelling'] as const
-export const projectChatTurnSchema = z.object({
-  id, sessionId: id, messageId: id, state: chatTurnStateSchema, leaseId: id.nullable(),
-  leaseExpiresAt: utcDateTimeSchema.nullable(), createdAt: utcDateTimeSchema, error: z.string().nullable(),
-}).strict()
+export const projectChatTurnSchema = z
+  .object({
+    id,
+    sessionId: id,
+    messageId: id,
+    state: chatTurnStateSchema,
+    leaseId: id.nullable(),
+    leaseExpiresAt: utcDateTimeSchema.nullable(),
+    createdAt: utcDateTimeSchema,
+    error: z.string().nullable(),
+  })
+  .strict()
 export const chatQuestionSchema = z.object({
-  header: z.string().optional(), question: z.string().min(1).max(8000),
-  options: z.array(z.object({ label: z.string(), description: z.string().optional() })).max(20).default([]),
+  header: z.string().optional(),
+  question: z.string().min(1).max(8000),
+  options: z
+    .array(z.object({ label: z.string(), description: z.string().optional() }))
+    .max(20)
+    .default([]),
   multiple: z.boolean().optional(),
 })
 export const chatInteractionPayloadSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('permission'), requestId: key, title: z.string().max(8000), action: key, resources: z.array(z.string().max(8000)).max(100) }).strict(),
-  z.object({ type: z.literal('question'), requestId: key, questions: z.array(chatQuestionSchema).min(1).max(10) }).strict(),
-  z.object({ type: z.literal('plan'), requestId: key, title: z.string().max(500), plan: z.string().max(200000) }).strict(),
+  z
+    .object({
+      type: z.literal('permission'),
+      requestId: key,
+      title: z.string().max(8000),
+      action: key,
+      resources: z.array(z.string().max(8000)).max(100),
+    })
+    .strict(),
+  z
+    .object({ type: z.literal('question'), requestId: key, questions: z.array(chatQuestionSchema).min(1).max(10) })
+    .strict(),
+  z
+    .object({ type: z.literal('plan'), requestId: key, title: z.string().max(500), plan: z.string().max(200000) })
+    .strict(),
 ])
 export const chatDecisionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('permission'), reply: z.enum(['once', 'reject']) }).strict(),
   z.object({ type: z.literal('question'), answers: z.array(z.array(z.string().max(8000)).max(20)).max(10) }).strict(),
-  z.object({ type: z.literal('plan'), action: z.enum(['approve', 'revise', 'discard']), editedPlan: z.string().max(200000).optional(), feedback: z.string().max(32000).optional() }).strict(),
+  z
+    .object({
+      type: z.literal('plan'),
+      action: z.enum(['approve', 'revise', 'discard']),
+      editedPlan: z.string().max(200000).optional(),
+      feedback: z.string().max(32000).optional(),
+    })
+    .strict(),
 ])
-export const projectChatInteractionSchema = z.object({
-  id, sessionId: id, turnId: id, version: z.number().int().positive(),
-  payload: chatInteractionPayloadSchema, state: z.enum(['pending', 'decided', 'expired']),
-  decision: chatDecisionSchema.nullable(),
-}).strict()
-export const projectChatSessionSchema = z.object({
-  id, organizationId: id, projectId: id, ownerUserId: key, runnerId: id, workspaceKey: key,
-  title: z.string().min(1).max(160), model: key, mode: z.enum(['chat', 'agent']),
-  baseBranch: z.string().min(1).max(240), boardId: id.nullable(), cardId: id.nullable(),
-  version: z.number().int().positive(), archivedAt: utcDateTimeSchema.nullable(), createdAt: utcDateTimeSchema, updatedAt: utcDateTimeSchema,
-}).strict()
-export const chatInventorySchema = z.object({
-  capability: z.literal(CHAT_CAPABILITY), enabled: z.boolean(),
-  workspaces: z.array(z.object({ projectId: id, key, label: z.string().max(160), branches: z.array(z.string().max(240)).max(500) }).strict()).max(100),
-  models: z.array(z.object({ id: key, label: z.string().max(200) }).strict()).max(1000),
-  integrations: z.object({ skills: z.boolean(), mcp: z.boolean(), memory: z.boolean() }).strict(),
-}).strict()
+export const projectChatInteractionSchema = z
+  .object({
+    id,
+    sessionId: id,
+    turnId: id,
+    version: z.number().int().positive(),
+    payload: chatInteractionPayloadSchema,
+    state: z.enum(['pending', 'decided', 'expired']),
+    decision: chatDecisionSchema.nullable(),
+  })
+  .strict()
+export const projectChatSessionSchema = z
+  .object({
+    id,
+    organizationId: id,
+    projectId: id,
+    ownerUserId: key,
+    runnerId: id,
+    workspaceKey: key,
+    title: z.string().min(1).max(160),
+    model: key,
+    mode: z.enum(['chat', 'agent']),
+    baseBranch: z.string().min(1).max(240),
+    boardId: id.nullable(),
+    cardId: id.nullable(),
+    version: z.number().int().positive(),
+    archivedAt: utcDateTimeSchema.nullable(),
+    createdAt: utcDateTimeSchema,
+    updatedAt: utcDateTimeSchema,
+  })
+  .strict()
+export const chatInventorySchema = z
+  .object({
+    capability: z.literal(CHAT_CAPABILITY),
+    enabled: z.boolean(),
+    workspaces: z
+      .array(
+        z
+          .object({ projectId: id, key, label: z.string().max(160), branches: z.array(z.string().max(240)).max(500) })
+          .strict()
+      )
+      .max(100),
+    models: z.array(z.object({ id: key, label: z.string().max(200) }).strict()).max(1000),
+    integrations: z.object({ skills: z.boolean(), mcp: z.boolean(), memory: z.boolean() }).strict(),
+  })
+  .strict()
 export const projectChatDestinationSchema = z.object({
-  runnerId: id, name: z.string(), online: z.boolean(), personal: z.boolean(), inventory: chatInventorySchema,
+  runnerId: id,
+  name: z.string(),
+  online: z.boolean(),
+  personal: z.boolean(),
+  inventory: chatInventorySchema,
 })
 export const chatPayloadSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('message'), message: projectChatMessageSchema }).strict(),
-  z.object({ type: z.literal('delta'), messageId: id, partId: key, kind: z.enum(['text', 'reasoning']), delta: z.string().max(32768) }).strict(),
+  z
+    .object({
+      type: z.literal('delta'),
+      messageId: id,
+      partId: key,
+      kind: z.enum(['text', 'reasoning']),
+      delta: z.string().max(32768),
+    })
+    .strict(),
   z.object({ type: z.literal('tool'), messageId: id, part: chatPartSchema.options[2] }).strict(),
   z.object({ type: z.literal('interaction'), interaction: projectChatInteractionSchema }).strict(),
   z.object({ type: z.literal('turn'), turn: projectChatTurnSchema }).strict(),
 ])
-export const projectChatEventSchema = z.object({
-  version: z.literal(1), sessionId: id, sequence: z.number().int().positive(), eventId: key,
-  payload: chatPayloadSchema,
-}).strict()
+export const projectChatEventSchema = z
+  .object({
+    version: z.literal(1),
+    sessionId: id,
+    sequence: z.number().int().positive(),
+    eventId: key,
+    payload: chatPayloadSchema,
+  })
+  .strict()
 export const chatUploadSchema = z.object({ eventId: key, payload: chatPayloadSchema }).strict()
-export const chatCreateSchema = projectChatSessionSchema.pick({ runnerId: true, workspaceKey: true, model: true, baseBranch: true, mode: true }).extend({
-  title: z.string().trim().min(1).max(160).default('New conversation'), boardId: id.nullable().default(null), cardId: id.nullable().default(null),
-}).strict()
+export const chatCreateSchema = projectChatSessionSchema
+  .pick({ runnerId: true, workspaceKey: true, model: true, baseBranch: true, mode: true })
+  .extend({
+    title: z.string().trim().min(1).max(160).default('New conversation'),
+    boardId: id.nullable().default(null),
+    cardId: id.nullable().default(null),
+  })
+  .strict()
 export type ChatCreate = z.infer<typeof chatCreateSchema>
 export type ChatInventory = z.infer<typeof chatInventorySchema>
 export type ChatPart = z.infer<typeof chatPartSchema>

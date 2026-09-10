@@ -84,7 +84,7 @@ try {
   if(['1','only'].includes(process.env.MAESTRLY_DESKTOP_E2E)){
     await restartApi()
     if(!process.env.MAESTRLY_PACKAGED_EXECUTABLE)command('npm',['run','build:desktop'],env)
-    command('npm',['run','test:e2e','--workspace','@maestrly/desktop','--','personal-device.spec.ts'],env)
+    command('npm',['run','test:e2e','--workspace','@maestrly/desktop','--',process.env.MAESTRLY_PROJECT_CHAT_E2E==='1'?'project-chat.spec.ts':'personal-device.spec.ts'],env)
   }
 } finally {
   for(const child of children) {

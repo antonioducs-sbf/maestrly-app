@@ -2,6 +2,8 @@
 
 The platform services are independent from the desktop application. A local installation needs PostgreSQL, the API server, and the web application. Runners are enrolled separately and always initiate outbound connections.
 
+[Project chat](project-chat.md) additionally requires an updated Maestrly desktop executor advertising `chat:interactive:v1`. Deploy its additive migration and API before the web bundle, then update and enable the executor. Existing CLI runners continue handling card jobs.
+
 ## Local installation
 
 1. Copy `deploy/compose/.env.example` to `deploy/compose/.env`.

@@ -24,11 +24,11 @@ export class PlatformConnectionService {
   private readonly states = new Map<string, PlatformConnectionView>()
   private readonly refreshing = new Map<string, Promise<string>>()
   private readonly pending = new Map<string, PendingAuthorization>()
-  private loaded=false
+  private loaded = false
   constructor(private readonly credentials = new PlatformCredentialStore()) {}
-  private ensureLoaded():void {
-    if(this.loaded)return
-    this.loaded=true
+  private ensureLoaded(): void {
+    if (this.loaded) return
+    this.loaded = true
     for (const connection of this.storedConnections()) {
       const credential = this.credentials.get(connection.id)
       this.states.set(connection.id, {
@@ -194,13 +194,13 @@ export class PlatformConnectionService {
       connection.state = 'connected'
       return credential.accessToken
     }
-    const refreshToken=credential.refreshToken
+    const refreshToken = credential.refreshToken
     if (!refreshToken) throw new Error('Sign in to the platform again.')
     const pending = this.refreshing.get(connectionId)
     if (pending) return pending
     const refresh = (async () => {
       const response = await fetch(connection.url + '/api/auth/oauth2/token', {
-        signal:AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(15000),
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -252,10 +252,9 @@ export class PlatformConnectionService {
             organizationName: organization.name,
             projectId: project.id,
             projectName: project.name,
-            repositories: await transport.request<Array<{ id: string; name: string; baseBranch?: string }>>(
-              'GET',
-              `/api/v1/organizations/${organization.id}/projects/${project.id}/repositories`
-            ),
+            repositories: await transport.request<
+              Array<{ id: string; name: string; baseBranch?: string; cloneUrl?: string }>
+            >('GET', `/api/v1/organizations/${organization.id}/projects/${project.id}/repositories`),
             boards: await transport.request<Array<{ id: string; name: string }>>(
               'GET',
               `/api/v1/organizations/${organization.id}/projects/${project.id}/boards`

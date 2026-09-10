@@ -5,7 +5,7 @@ The Maestrly app can execute Kanban jobs using its normal chat engine. It includ
 ## Setup
 
 1. Open **Settings → Platform**. Add your Kanban URL and connect by confirming the code in your browser.
-2. Under **Projects on this computer**, select the Kanban project, then its local Git folder and repository. Use **Choose folder** to add a checkout. Choose **Link project**. Analysis jobs can run without a Kanban repository binding; the local Maestrly workspace still needs to be a Git repository.
+2. Under **Projects on this computer**, select the Kanban project, then the folder on this computer. Use **Choose folder** for an existing checkout (a folder that is not a Git repository yet is initialized automatically), or **Clone <repository>** when the Kanban repository has a clone URL — the desktop clones it with your local Git credentials and selects it. Choose **Link project**. Analysis jobs can run without a Kanban repository binding.
 3. Under **Maestrly executor**, choose **Only me** for a personal computer or **Approved projects** for a team executor. Team enrollment requires permission to administer runners for the selected projects.
 4. Select the connected accounts to make available. **Accounts, skills and MCPs** opens the existing chat settings, including subscription login. Refresh accounts after connecting one. Account names and credentials remain local; the platform receives opaque model identifiers and model labels.
 5. Choose allowed tools and press **Start executor**. Enable **Continue in background** to keep work running after closing the window. **Start with login** starts the installed app and its saved executor configuration at operating-system login.

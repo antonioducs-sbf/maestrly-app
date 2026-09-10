@@ -37,7 +37,7 @@ export interface RemotePlatformProject {
   organizationName: string
   projectId: string
   projectName: string
-  repositories?:Array<{id:string;name:string;baseBranch?:string}>
+  repositories?:Array<{id:string;name:string;baseBranch?:string;cloneUrl?:string}>
   boards: Array<{ id: string; name: string }>
 }
 

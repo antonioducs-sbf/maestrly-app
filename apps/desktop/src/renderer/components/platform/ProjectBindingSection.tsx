@@ -1,8 +1,14 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, FolderOpen, Link2, Loader2 } from 'lucide-react'
+import { Check, CloudDownload, FolderOpen, Link2, Loader2 } from 'lucide-react'
 import type { Workspace } from '../../../preload'
 import type { PlatformConnectionView, PlatformProjectBinding, RemotePlatformProject } from '../../../shared/platform'
+import {
+  suggestProjectName,
+  type ProjectSetupPhase,
+  type ProjectSetupRequest,
+  type ProjectSetupResult,
+} from '../../../shared/project-setup'
 import { Button } from '../ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select'
 
@@ -52,8 +58,14 @@ function Step({
   )
 }
 
+class ProjectSetupFailed extends Error {
+  constructor(readonly code: string) {
+    super(code)
+  }
+}
+
 export function ProjectBindingSection({ connections }: { connections: PlatformConnectionView[] }) {
-  const { i18n } = useTranslation()
+  const { i18n, t } = useTranslation('ui')
   const L = (en: string, pt: string) => (i18n.language.startsWith('pt') ? pt : en)
   const id = useId()
   const pickFolderRef = useRef<HTMLButtonElement>(null)
@@ -72,7 +84,22 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
   const [revision, setRevision] = useState(0)
-  const [busy, setBusy] = useState<'folder' | 'save' | 'remove' | null>(null)
+  const [busy, setBusy] = useState<'folder' | 'clone' | 'save' | 'remove' | null>(null)
+  const [phase, setPhase] = useState<{ phase: ProjectSetupPhase; percent?: number } | null>(null)
+  const operationRef = useRef<string | null>(null)
+
+  useEffect(
+    () =>
+      window.api.onProjectSetupProgress((progress) => {
+        if (progress.operationId !== operationRef.current) return
+        setPhase({ phase: progress.phase, percent: progress.percent })
+        // An empty remote is fine for a fresh project folder; never block on a question here.
+        if (progress.phase === 'awaiting-empty-remote-confirmation') {
+          void window.api.resolveEmptyRemoteProjectSetup(progress.operationId, 'initialize-local')
+        }
+      }),
+    []
+  )
   const [error, setError] = useState('')
   const [folderError, setFolderError] = useState('')
   const [notice, setNotice] = useState('')
@@ -186,20 +213,56 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
     try {
       await operation()
     } catch (e) {
-      const message = (e as Error).message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '')
-      if (kind === 'folder') setFolderError(message)
+      const message =
+        e instanceof ProjectSetupFailed
+          ? t(`projectSetup.errors.${e.code}`)
+          : (e as Error).message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '')
+      if (kind === 'folder' || kind === 'clone') setFolderError(message)
       else setError(message)
     } finally {
       setBusy(null)
+      setPhase(null)
+      operationRef.current = null
     }
+  }
+  /** Run one project-setup operation and return its workspace; throws ProjectSetupFailed on error. */
+  async function runSetup(
+    request: ProjectSetupRequest extends infer R ? (R extends unknown ? Omit<R, 'operationId'> : never) : never
+  ): Promise<ProjectSetupResult<Workspace>> {
+    const operationId = crypto.randomUUID()
+    operationRef.current = operationId
+    const result = await window.api.startProjectSetup({ ...request, operationId } as ProjectSetupRequest)
+    if (result.status === 'error') throw new ProjectSetupFailed(result.error.code)
+    return result
+  }
+  async function adopt(workspace: Workspace, repository?: string) {
+    const workspaces = await window.api.listWorkspaces()
+    setData((current) => ({ ...current, workspaces }))
+    chooseWorkspace(workspace.id)
+    if (repository) setRepositoryId(repository)
   }
   async function chooseFolder() {
     const folder = await window.api.pickFolder()
     if (!folder) return
-    const selected = await window.api.addWorkspace(folder)
-    const workspaces = await window.api.listWorkspaces()
-    setData((current) => ({ ...current, workspaces }))
-    chooseWorkspace(selected.id)
+    let result = await runSetup({ kind: 'open', path: folder })
+    // A plain folder is fine: Git is only an implementation detail of how conversations are isolated.
+    if (result.status === 'needs-initialization') result = await runSetup({ kind: 'initialize-existing', path: folder })
+    if (result.status === 'success') await adopt(result.workspace)
+  }
+  const cloneable =
+    repositories.find((r) => r.id === repositoryId && r.cloneUrl) ?? repositories.find((r) => r.cloneUrl)
+  async function cloneRepository() {
+    if (!cloneable?.cloneUrl) return
+    const parent = await window.api.pickFolder()
+    if (!parent) return
+    const result = await runSetup({
+      kind: 'clone',
+      parentPath: parent,
+      name: suggestProjectName(cloneable.cloneUrl) || cloneable.name,
+      remoteUrl: cloneable.cloneUrl,
+      ...(cloneable.baseBranch ? { defaultBranch: cloneable.baseBranch } : {}),
+    })
+    if (result.status === 'success') await adopt(result.workspace, cloneable.id)
   }
   function submit() {
     if (blocker) {
@@ -387,13 +450,40 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
                         workspace ? 'Escolher outra pasta…' : 'Escolher pasta…'
                       )}
                     </Button>
-                    <span className="text-xs text-muted-foreground">
-                      {L(
-                        'Must be a Git repository already on this Mac.',
-                        'Precisa ser um repositório Git que já está neste computador.'
-                      )}
-                    </span>
+                    {cloneable && !workspace ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void act('clone', cloneRepository)}
+                        title={cloneable.cloneUrl}
+                      >
+                        {busy === 'clone' ? (
+                          <Loader2 size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                        ) : (
+                          <CloudDownload size={14} aria-hidden="true" />
+                        )}
+                        {L(`Clone ${cloneable.name}…`, `Clonar ${cloneable.name}…`)}
+                      </Button>
+                    ) : null}
                   </div>
+                  {phase ? (
+                    <p role="status" className="text-xs text-muted-foreground" data-testid="folder-progress">
+                      {t(`projectSetup.phases.${phase.phase}`)}
+                      {phase.percent !== undefined ? ` ${phase.percent}%` : ''}
+                    </p>
+                  ) : !workspace && !folderError ? (
+                    <p className="text-xs text-muted-foreground">
+                      {cloneable
+                        ? L(
+                            'Pick an existing folder, or clone the project repository into a new one.',
+                            'Escolha uma pasta existente ou clone o repositório do projeto em uma nova.'
+                          )
+                        : L(
+                            'Any folder works. If it is not a Git repository yet, one is initialized for you.',
+                            'Qualquer pasta serve. Se ainda não for um repositório Git, ele é iniciado para você.'
+                          )}
+                    </p>
+                  ) : null}
                   {folderError ? (
                     <p role="alert" className="text-xs text-destructive">
                       {folderError}

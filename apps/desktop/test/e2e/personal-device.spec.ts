@@ -1,7 +1,8 @@
 import {createServer,type Server} from 'node:http'
 import {columnAutomationSchema} from '@maestrly/protocol'
 import { test, expect, _electron as electron } from '@playwright/test'
-import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, realpath, stat } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -40,7 +41,10 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
   test.skip(!process.env.MAESTRLY_LIVE_E2E, 'Requires scripts/test-kanban-e2e.mjs with MAESTRLY_DESKTOP_E2E=1.')
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'maestrly-personal-desktop-'))),
     server = process.env.MAESTRLY_SERVER_URL!
-  const nonGit=await mkdtemp(path.join(os.tmpdir(),'maestrly-non-git-folder-'))
+  const nonGit=await realpath(await mkdtemp(path.join(os.tmpdir(),'maestrly-non-git-folder-')))
+  const cloneParent=await realpath(await mkdtemp(path.join(os.tmpdir(),'maestrly-clone-parent-')))
+  const bare=path.join(cloneParent,'fixture-origin.git')
+  let gitServer:Server|undefined
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined
   let modelServer:Server|undefined
   const modelRequests:any[]=[]
@@ -77,7 +81,8 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
     ).json()
     const secondProject=await request.post(server+'/api/v1/organizations/'+organizationId+'/projects',{headers:{...headers,'idempotency-key':crypto.randomUUID()},data:{name:'Another local project'}})
     expect(secondProject.ok()).toBe(true)
-    execFileSync('git', ['init', '-q', root])
+    const secondProjectId=(await secondProject.json()).project.id
+    execFileSync('git', ['init', '-q', '-b', 'main', root])
     execFileSync('git', [
       '-C',
       root,
@@ -90,6 +95,18 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
       '-qm',
       'Fixture',
     ])
+    // Serve a bare clone over Git's dumb HTTP protocol so the Kanban can hold a real http:// clone URL.
+    execFileSync('git',['clone','--bare','-q',root,bare])
+    execFileSync('git',['-C',bare,'update-server-info'])
+    gitServer=createServer(async(req,res)=>{
+      const file=path.join(bare,decodeURIComponent(new URL(req.url!,'http://x').pathname.replace(/^\/fixture\.git/,'')))
+      if(!file.startsWith(bare)||!(await stat(file).catch(()=>null))?.isFile()){res.writeHead(404).end();return}
+      createReadStream(file).pipe(res)
+    })
+    await new Promise<void>(resolve=>gitServer!.listen(0,'127.0.0.1',resolve))
+    const cloneUrl='http://127.0.0.1:'+(gitServer.address() as {port:number}).port+'/fixture.git'
+    const repo=await request.post(server+'/api/v1/organizations/'+organizationId+'/projects/'+secondProjectId+'/repositories',{headers:{...headers,'idempotency-key':crypto.randomUUID()},data:{name:'Fixture source',cloneUrl,baseBranch:'main'}})
+    expect(repo.ok(),await repo.text()).toBe(true)
     const launch=()=>electron.launch({
       ...(process.env.MAESTRLY_PACKAGED_EXECUTABLE ? {executablePath:process.env.MAESTRLY_PACKAGED_EXECUTABLE,args:['--use-mock-keychain']} : {args:[path.join(desktop,'out/main/index.js')]}),
       env: {
@@ -144,8 +161,11 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
     await bindingPanel.getByRole('button',{name:'Choose folder…',exact:true}).click()
     await expect(bindingPanel.getByTestId('link-blocker')).toContainText('choose the folder')
     await bindingPanel.getByRole('button',{name:'Choose folder…',exact:true}).click()
-    await expect(bindingPanel.getByRole('alert')).toContainText(/git/i)
-    await bindingPanel.getByRole('button',{name:'Choose folder…',exact:true}).click()
+    await expect(bindingPanel.getByText(nonGit,{exact:true})).toBeVisible()
+    await expect(bindingPanel.getByRole('alert')).toHaveCount(0)
+    expect(execFileSync('git',['-C',nonGit,'rev-parse','--is-inside-work-tree']).toString().trim()).toBe('true')
+    expect(execFileSync('git',['-C',nonGit,'log','--oneline']).toString().trim()).not.toBe('')
+    await bindingPanel.getByRole('button',{name:'Choose another folder…',exact:true}).click()
     await expect(bindingPanel.getByText(root,{exact:true})).toBeVisible()
     await bindingPanel.getByRole('button',{name:'Link project',exact:true}).click()
     await expect(bindingPanel.getByTestId('saved-project-binding')).toContainText('Desktop personal fixture')
@@ -180,7 +200,23 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
 
     await bindingPanel.getByRole('button',{name:'Cancel',exact:true}).click()
     await expect(bindingPanel.getByRole('alert')).toHaveCount(0)
-    await expect(bindingPanel.getByTestId('saved-project-binding')).toContainText('Desktop personal fixture')
+    // Clone the repository registered in the Kanban straight from the desktop.
+    await app.evaluate(({dialog},parent)=>{dialog.showOpenDialog=async()=>({canceled:false,filePaths:[parent]})},cloneParent)
+    await bindingPanel.getByRole('button',{name:'Link another project',exact:true}).click()
+    await bindingPanel.getByRole('combobox',{name:'Kanban project',exact:true}).click()
+    await page.getByRole('option',{name:/Another local project/}).click()
+    await bindingPanel.getByRole('button',{name:'Clone Fixture source…',exact:true}).click()
+    const cloned=path.join(cloneParent,'fixture')
+    await expect(bindingPanel.getByText(cloned,{exact:true})).toBeVisible({timeout:30000})
+    await expect(bindingPanel.getByRole('alert')).toHaveCount(0)
+    await expect(bindingPanel.getByRole('button',{name:'Clone Fixture source…',exact:true})).toHaveCount(0)
+    await expect(bindingPanel.getByRole('combobox',{name:'Code repository',exact:true})).toHaveText('Fixture source · main')
+    expect(execFileSync('git',['-C',cloned,'rev-parse','--abbrev-ref','HEAD']).toString().trim()).toBe('main')
+    await bindingPanel.getByRole('button',{name:'Link project',exact:true}).click()
+    await expect(bindingPanel.getByTestId('saved-project-binding')).toHaveCount(2)
+    await expect(bindingPanel.getByTestId('saved-project-binding').filter({hasText:'Another local project'})).toContainText('Fixture source')
+    await bindingPanel.screenshot({style:'html{background:#252929!important}',path:info.outputPath('project-binding-cloned-en.png')})
+    await expect(bindingPanel.getByTestId('saved-project-binding').first()).toContainText('Desktop personal fixture')
     await page.getByLabel(/Local executor fixture/).check()
     await page.getByLabel('Continue in background when the window is closed',{exact:true}).check()
     await page.getByRole('button',{name:'Start executor',exact:true}).click()
@@ -266,5 +302,7 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
     if(modelServer)await new Promise<void>(resolve=>modelServer!.close(()=>resolve()))
     await rm(root, { recursive: true, force: true })
     await rm(nonGit, { recursive: true, force: true })
+    await rm(cloneParent, { recursive: true, force: true })
+    if(gitServer)await new Promise<void>(resolve=>gitServer!.close(()=>resolve()))
   }
 })

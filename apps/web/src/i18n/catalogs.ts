@@ -661,7 +661,9 @@ export const en = {
   "{count} open": "{count} open",
   "{count} running now": "{count} running now",
   "{count} waiting for you": "{count} waiting for you",
-  "Nothing waiting for you": "Nothing waiting for you"
+  "Nothing waiting for you": "Nothing waiting for you",
+  "Move to column": "Move to column",
+  "Agent working": "Agent working"
 } as const
 export const ptBR: Record<keyof typeof en, string> = {
   "Work moves forward. You stay in control.": "O trabalho avança. Você mantém o controle.",
@@ -1326,5 +1328,7 @@ export const ptBR: Record<keyof typeof en, string> = {
   "{count} open": "{count} em aberto",
   "{count} running now": "{count} rodando agora",
   "{count} waiting for you": "{count} aguardando você",
-  "Nothing waiting for you": "Nada aguardando você"
+  "Nothing waiting for you": "Nada aguardando você",
+  "Move to column": "Mover para a coluna",
+  "Agent working": "Agente trabalhando"
 }

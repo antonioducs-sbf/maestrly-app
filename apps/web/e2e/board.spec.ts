@@ -65,6 +65,10 @@ test('creates and moves work with a keyboard-accessible alternative', async ({ p
   await page.getByRole('option', {name:'Review',exact:true}).click()
   await expect.poll(() => moveBody?.targetColumnId).toBe('review')
   expect(moveBody).toMatchObject({ expectedVersion: 1, source: 'human', allowAutomationChain: false })
+  await expect(page.locator('.board-column[data-cue="fired"]')).toHaveCount(1)
+  await expect(page.locator('.board-column[data-automated="true"]')).toHaveCount(1)
+  await expect(page.locator('.work-card[data-priority="high"]')).toHaveCount(1)
+  await expect(page.locator('.work-card .execution-track')).toHaveCount(0)
 })
 
 test('viewer can inspect work but cannot mutate it', async ({ page }, testInfo) => {

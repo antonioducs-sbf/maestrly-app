@@ -455,6 +455,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
               key={boardId}
               organizationId={organizationId}
               snapshot={snapshot}
+              executions={executions}
               readOnly={readOnly}
               onReload={() => void reloadBoard()}
             />

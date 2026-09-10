@@ -1,9 +1,11 @@
 import { PersonalExecutionDialog } from '../devices/PersonalExecutionDialog.js'
 import { AutomationEditor } from '../automations/AutomationEditor.js'
 import { BoardAutomationSettings } from '../automations/BoardAutomationSettings.js'
-import { useMemo, useState } from 'react'
-import { Bot, CircleDot, Plus, Search, Columns3, List, Settings2, LockKeyhole, ArrowUp, ArrowDown } from 'lucide-react'
+import { useMemo, useRef, useState, type CSSProperties } from 'react'
+import { Bot, CircleDashed, CheckCheck, Inbox, Plus, Search, Columns3, List, Settings2, LockKeyhole, ArrowUp, ArrowDown, MonitorPlay } from 'lucide-react'
 import type { Board, BoardColumn, Card } from '@maestrly/protocol'
+import type { Operation } from '../executions/types.js'
+import { PriorityGlyph } from './PriorityGlyph.js'
 import { t, useLocale, number, errorText } from '../../i18n/index.js'
 import { write } from '../../app/api.js'
 import { Select } from '../../components/Select.js'
@@ -23,15 +25,45 @@ export function BoardView({
   snapshot,
   readOnly = false,
   canManageAutomation=false,
+  executions = [],
   onReload,
 }: {
   organizationId: string
   snapshot: BoardSnapshot
   readOnly?: boolean
   canManageAutomation?:boolean
+  executions?: Operation[]
   onReload(): void
 }) {
   useLocale()
+  // One-shot cue for the column that just received a card and started a job.
+  const [cue, setCue] = useState<string | null>(null)
+  const cueTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Columns with an agent working right now, derived from the execution ledger.
+  const liveColumns = useMemo(() => {
+    const columnByCard = new Map(snapshot.cards.map((c) => [c.id, c.columnId]))
+    return new Set(
+      executions
+        .filter((e) => e.runState === 'running' || e.jobState === 'active')
+        .map((e) => columnByCard.get(e.cardId))
+        .filter((id): id is string => !!id)
+    )
+  }, [executions, snapshot.cards])
+  const dragDepth = useRef(new Map<string, number>())
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
+  const dragEnter = (columnId: string) => {
+    dragDepth.current.set(columnId, (dragDepth.current.get(columnId) ?? 0) + 1)
+    setDropTarget(columnId)
+  }
+  const dragLeave = (columnId: string) => {
+    const depth = (dragDepth.current.get(columnId) ?? 1) - 1
+    dragDepth.current.set(columnId, Math.max(0, depth))
+    if (depth <= 0) setDropTarget((current) => (current === columnId ? null : current))
+  }
+  const dragReset = () => {
+    dragDepth.current.clear()
+    setDropTarget(null)
+  }
   const [personalCard,setPersonalCard]=useState<Card|null>(null)
   const [editingAutomation,setEditingAutomation]=useState<string|null>(null)
   const [selected, setSelected] = useState<Card | null>(null),
@@ -72,14 +104,23 @@ export function BoardView({
     setMoving(true)
     setError('')
     try {
-      await write(`/api/v1/organizations/${organizationId}/cards/${card.id}/move`, 'POST', {
-        expectedVersion: card.version,
-        targetColumnId: columnId,
-        targetPosition: position,
-        source: 'human',
-        allowAutomationChain: false,
-        chainDepth: 0,
-      })
+      const result = await write<{ card: Card; jobId?: string }>(
+        `/api/v1/organizations/${organizationId}/cards/${card.id}/move`,
+        'POST',
+        {
+          expectedVersion: card.version,
+          targetColumnId: columnId,
+          targetPosition: position,
+          source: 'human',
+          allowAutomationChain: false,
+          chainDepth: 0,
+        }
+      )
+      if (result?.jobId) {
+        setCue(columnId)
+        if (cueTimer.current) clearTimeout(cueTimer.current)
+        cueTimer.current = setTimeout(() => setCue(null), 1600)
+      }
       onReload()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not save. Please try again.')
@@ -145,13 +186,25 @@ export function BoardView({
         </div>
       ) : null}
       <section className={'board ' + (layout === 'list' ? 'board-list' : '')} aria-label={snapshot.board.name}>
-        {snapshot.columns.map((column) => (
+        {snapshot.columns.map((column, columnIndex) => {
+          const role = column.role ?? 'normal'
+          const automated = !!column.executionPolicyId
+          const RoleIcon = role === 'backlog' ? Inbox : role === 'done' ? CheckCheck : automated ? Bot : CircleDashed
+          const cueState = cue === column.id ? 'fired' : liveColumns.has(column.id) ? 'live' : undefined
+          return (
           <section
-            className="board-column"
+            className={'board-column' + (dropTarget === column.id ? ' drop-target' : '')}
             key={column.id}
+            data-role={role}
+            data-automated={automated}
+            data-cue={cueState}
+            style={{ '--i': columnIndex } as CSSProperties}
+            onDragEnter={() => { if (!readOnly) dragEnter(column.id) }}
+            onDragLeave={() => dragLeave(column.id)}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault()
+              dragReset()
               if (readOnly) return
               const source = e.dataTransfer.getData('text/column-id')
               if (source) {
@@ -162,13 +215,17 @@ export function BoardView({
               if (card) void move(card, column.id, snapshot.cards.filter((c) => c.columnId === column.id).length)
             }}
           >
-            <header draggable={!readOnly} onDragStart={(e) => e.dataTransfer.setData('text/column-id', column.id)}>
+            {automated ? (
+              <i className="cue-rail" aria-hidden="true" title={cueState === 'live' ? t('Agent working') : undefined} />
+            ) : null}
+            <header draggable={!readOnly} onDragStart={(e) => e.dataTransfer.setData('text/column-id', column.id)} onDragEnd={dragReset}>
               <div>
-                <CircleDot size={13} />
+                <RoleIcon size={14} aria-hidden="true" />
                 <h2>{column.name}</h2>
                 <span>{number(cardsByColumn.get(column.id)?.length ?? 0)}</span>
+                {cueState === 'live' ? <em className="agent-working">{t('Agent working')}</em> : null}
               </div>
-              {column.role==='backlog'||column.role==='done'?<LockKeyhole size={15} aria-label={t('Fixed column')}/>:canManageAutomation?<button className="icon-button" aria-label={t('Configure automation')+' '+column.name} onClick={()=>setEditingAutomation(column.id)}><Settings2 size={15}/></button>:column.executionPolicyId?<Bot size={15} aria-label={t('Agent automation configured')}/>:null}
+              {role==='backlog'||role==='done'?<LockKeyhole size={15} aria-label={t('Fixed column')}/>:canManageAutomation?<button className="icon-button" aria-label={t('Configure automation')+' '+column.name} onClick={()=>setEditingAutomation(column.id)}><Settings2 size={15}/></button>:automated?<Bot size={15} aria-label={t('Agent automation configured')}/>:null}
             </header>
             {!readOnly && (column.role??'normal')==='normal' ? (
               <ColumnControls
@@ -191,10 +248,16 @@ export function BoardView({
                   <article
                     className="work-card"
                     key={card.id}
+                    data-priority={card.priority}
                     draggable={!readOnly && !showArchived && !moving}
                     onDragStart={(e) => {
                       e.stopPropagation()
                       e.dataTransfer.setData('text/card-id', card.id)
+                      e.currentTarget.classList.add('dragging')
+                    }}
+                    onDragEnd={(e) => {
+                      e.currentTarget.classList.remove('dragging')
+                      dragReset()
                     }}
                     onDragOver={(e) => e.preventDefault()}
                     onDrop={(e) => {
@@ -202,40 +265,37 @@ export function BoardView({
                       if (source) {
                         e.preventDefault()
                         e.stopPropagation()
+                        dragReset()
                         if (source.id !== card.id) void move(source, column.id, card.position)
                       }
                     }}
                   >
-                    <div className="card-reference">
-                      {card.id.slice(0, 8)}
-                      <span>{t(card.priority)}</span>
-                    </div>
                     <button className="card-main" onClick={() => setSelected(card)}>
                       <span>{card.title}</span>
                     </button>
+                    <div className="card-meta">
+                      <PriorityGlyph priority={card.priority} />
+                      <code>{card.id.slice(0, 8)}</code>
+                      {snapshot.cards.some((c) => c.parentCardId === card.id) ? (
+                        <span>
+                          ↳ {number(snapshot.cards.filter((c) => c.parentCardId === card.id).length)} {t('Subtasks')}
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="card-tags">
                       {card.automationBlocked?<span className="dispatch-blocked">{t('Dispatch blocked')}</span>:null}
                       {card.labels.map((label) => (
                         <span key={label}>{label}</span>
                       ))}
-                      {snapshot.cards.some((c) => c.parentCardId === card.id) ? (
-                        <span>
-                          {number(snapshot.cards.filter((c) => c.parentCardId === card.id).length)} {t('Subtasks')}
-                        </span>
-                      ) : null}
                     </div>
-                    <div className="execution-track" aria-label={t('Column policy')}>
-                      <i />
-                      <span>{t(column.executionPolicyId ? 'Automation configured' : 'Manual column')}</span>
-                    </div>
-                    {!readOnly&&!showArchived?<button className="personal-card-button" disabled={moving} aria-label={t('Run on my computer')+' '+card.title} onClick={()=>setPersonalCard(card)}>{t('Run on my computer')}</button>:null}
-                    <div className="card-move-actions">
+                    <div className="card-actions">
                       {!readOnly && !showArchived ? (
                         <>
                           <button
                             className="icon-button"
                             disabled={moving || index === 0}
                             aria-label={t('Move card up') + ' ' + card.title}
+                            title={t('Move card up')}
                             onClick={() => void move(card, column.id, siblings[index - 1]?.position ?? 0)}
                           >
                             <ArrowUp size={13} />
@@ -244,6 +304,7 @@ export function BoardView({
                             className="icon-button"
                             disabled={moving || index === siblings.length - 1}
                             aria-label={t('Move card down') + ' ' + card.title}
+                            title={t('Move card down')}
                             onClick={() => void move(card, column.id, siblings[index + 1]?.position ?? siblings.length)}
                           >
                             <ArrowDown size={13} />
@@ -258,6 +319,17 @@ export function BoardView({
                         label={t('Move {title}', { title: card.title })}
                         options={snapshot.columns.map((c) => ({ value: c.id, label: c.name }))}
                       />
+                      {!readOnly && !showArchived ? (
+                        <button
+                          className="icon-button"
+                          disabled={moving}
+                          aria-label={t('Run on my computer') + ' ' + card.title}
+                          title={t('Run on my computer')}
+                          onClick={() => setPersonalCard(card)}
+                        >
+                          <MonitorPlay size={14} />
+                        </button>
+                      ) : null}
                     </div>
                   </article>
                 )
@@ -276,7 +348,8 @@ export function BoardView({
               </button>
             ) : null}
           </section>
-        ))}
+          )
+        })}
       </section>
       {personalCard?<PersonalExecutionDialog card={personalCard} onClose={()=>setPersonalCard(null)} onExecuted={onReload}/>:null}
       {creatingColumn ? (

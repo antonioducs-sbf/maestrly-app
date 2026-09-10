@@ -1,7 +1,7 @@
 import {createServer,type Server} from 'node:http'
 import {columnAutomationSchema} from '@maestrly/protocol'
 import { test, expect, _electron as electron } from '@playwright/test'
-import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, realpath } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -38,8 +38,9 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
   request,
 }, info) => {
   test.skip(!process.env.MAESTRLY_LIVE_E2E, 'Requires scripts/test-kanban-e2e.mjs with MAESTRLY_DESKTOP_E2E=1.')
-  const root = await mkdtemp(path.join(os.tmpdir(), 'maestrly-personal-desktop-')),
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'maestrly-personal-desktop-'))),
     server = process.env.MAESTRLY_SERVER_URL!
+  const nonGit=await mkdtemp(path.join(os.tmpdir(),'maestrly-non-git-folder-'))
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined
   let modelServer:Server|undefined
   const modelRequests:any[]=[]
@@ -74,6 +75,8 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
         data: { name: 'Desktop personal fixture' },
       })
     ).json()
+    const secondProject=await request.post(server+'/api/v1/organizations/'+organizationId+'/projects',{headers:{...headers,'idempotency-key':crypto.randomUUID()},data:{name:'Another local project'}})
+    expect(secondProject.ok()).toBe(true)
     execFileSync('git', ['init', '-q', root])
     execFileSync('git', [
       '-C',
@@ -120,19 +123,61 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
         { timeout: 20000, intervals: [1100] }
       )
       .toBe('connected')
-    const workspace = await page.evaluate((dir) => window.api.addWorkspace(dir), root)
-    await page.evaluate((binding) => window.api.platformSetProjectBinding(binding), {
-      workspaceId: workspace.id,
-      connectionId: connection.id,
-      organizationId,
-      projectId: created.project.id,
-      boardId: created.boardId,
-    })
     const provider=await page.evaluate(baseURL=>window.api.chatAddProvider({name:'Local executor fixture',baseURL,key:'fixture-key',kind:'openai'}),'http://127.0.0.1:'+modelPort+'/v1')
     expect(provider.ok).toBe(true)
     await page.getByTitle('Settings').click()
     await page.getByRole('button',{name:/Platform/}).click()
     await expect(page.getByText('Maestrly executor',{exact:true})).toBeVisible()
+    const bindingPanel=page.getByTestId('project-binding-section')
+    await bindingPanel.getByRole('combobox',{name:'1. Kanban project',exact:true}).click()
+    await page.getByRole('option',{name:/Desktop personal fixture/}).click()
+    await expect(bindingPanel.getByText('No local folder selected yet.',{exact:true})).toBeVisible()
+    await expect(bindingPanel.getByRole('button',{name:'Link project',exact:true})).toBeDisabled()
+    await bindingPanel.screenshot({style:'html{background:#252929!important}',path:info.outputPath('project-binding-empty-en.png')})
+    await page.evaluate(()=>window.api.setLocale('pt-BR'))
+    await expect(bindingPanel.getByRole('heading',{name:'Projetos neste computador',exact:true})).toBeVisible()
+    await bindingPanel.screenshot({style:'html{background:#252929!important}',path:info.outputPath('project-binding-empty-pt.png')})
+    await page.evaluate(()=>window.api.setLocale('en'))
+    await app.evaluate(({dialog},folders)=>{let index=0;dialog.showOpenDialog=async()=>{if(index++===0)return {canceled:true,filePaths:[]};return {canceled:false,filePaths:[index===2?folders.nonGit:folders.root]}}},{root,nonGit})
+    await bindingPanel.getByRole('button',{name:'Choose folder…',exact:true}).click()
+    await expect(bindingPanel.getByText('No local folder selected yet.',{exact:true})).toBeVisible()
+    await bindingPanel.getByRole('button',{name:'Choose folder…',exact:true}).click()
+    await expect(bindingPanel.getByRole('alert')).toContainText(/git/i)
+    await expect(bindingPanel.getByRole('button',{name:'Link project',exact:true})).toBeDisabled()
+    await bindingPanel.getByRole('button',{name:'Choose folder…',exact:true}).click()
+    await expect(bindingPanel.getByText(root,{exact:true})).toBeVisible()
+    await bindingPanel.getByRole('button',{name:'Link project',exact:true}).click()
+    await expect(bindingPanel.getByTestId('saved-project-binding')).toContainText('Desktop personal fixture')
+    await expect(bindingPanel.getByTestId('saved-project-binding')).toContainText(root)
+    await expect(bindingPanel.getByRole('combobox',{name:'2. Folder on this computer',exact:true})).toHaveCount(0)
+    await bindingPanel.screenshot({style:'html{background:#252929!important}',path:info.outputPath('project-binding-saved-en.png')})
+    await page.evaluate(()=>window.api.setLocale('pt-BR'))
+    await expect(bindingPanel.getByText('Projeto vinculado. Agora você pode iniciar o executor abaixo.',{exact:true})).toBeVisible()
+    expect(await bindingPanel.evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true)
+    await bindingPanel.screenshot({style:'html{background:#252929!important}',path:info.outputPath('project-binding-saved-pt.png')})
+    await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1000,900))
+    expect(await bindingPanel.evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true)
+    await bindingPanel.screenshot({style:'html{background:#252929!important}',path:info.outputPath('project-binding-narrow-pt.png')})
+    await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1400,1000))
+
+    await page.evaluate(()=>window.api.setLocale('en'))
+    await bindingPanel.getByRole('button',{name:'Remove link',exact:true}).click()
+    await expect(bindingPanel.getByTestId('saved-project-binding')).toHaveCount(0)
+    await bindingPanel.getByRole('button',{name:'Undo',exact:true}).click()
+    await expect(bindingPanel.getByTestId('saved-project-binding')).toHaveCount(1)
+    await bindingPanel.getByRole('button',{name:'Link another project',exact:true}).click()
+    await bindingPanel.getByRole('combobox',{name:'1. Kanban project',exact:true}).click()
+    await page.getByRole('option',{name:/Another local project/}).click()
+    await expect(bindingPanel.getByRole('combobox',{name:'2. Folder on this computer',exact:true})).toHaveText('Select a local folder…')
+    await bindingPanel.getByRole('combobox',{name:'2. Folder on this computer',exact:true}).click()
+    await page.getByRole('option',{name:new RegExp('maestrly-personal-desktop-')}).click()
+    await expect(bindingPanel.getByRole('alert')).toContainText('already linked to another project')
+    await expect(bindingPanel.getByRole('button',{name:'Link project',exact:true})).toBeDisabled()
+
+
+    await bindingPanel.getByRole('button',{name:'Cancel',exact:true}).click()
+    await expect(bindingPanel.getByRole('alert')).toHaveCount(0)
+    await expect(bindingPanel.getByTestId('saved-project-binding')).toContainText('Desktop personal fixture')
     await page.getByLabel(/Local executor fixture/).check()
     await page.getByLabel('Continue in background when the window is closed',{exact:true}).check()
     await page.getByRole('button',{name:'Start executor',exact:true}).click()
@@ -217,5 +262,6 @@ test('pairs the real desktop, exposes only an owner device and disables it on di
     await app?.close()
     if(modelServer)await new Promise<void>(resolve=>modelServer!.close(()=>resolve()))
     await rm(root, { recursive: true, force: true })
+    await rm(nonGit, { recursive: true, force: true })
   }
 })

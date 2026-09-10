@@ -5,6 +5,7 @@ import { api, write } from '../../app/api.js'
 import { t, useLocale, errorText, dateTime } from '../../i18n/index.js'
 import { FormDialog } from '../../components/FormDialog.js'
 import { ConnectDesktop } from './ConnectDesktop.js'
+import { EmptyState } from '../../components/EmptyState.js'
 export function PersonalDevicesPanel({ organizationId, projectId }: { organizationId: string; projectId: string }) {
   useLocale()
   const [devices, setDevices] = useState<PersonalDevice[]>([]),
@@ -89,10 +90,9 @@ export function PersonalDevicesPanel({ organizationId, projectId }: { organizati
         ))}
       </div>
       {!loading && !devices.length ? (
-        <div className="empty">
-          <h3>{t('No personal computer connected for this project.')}</h3>
+        <EmptyState title={t('No personal computer connected for this project.')}>
           <p>{t('Open Maestrly desktop to execute on your computer.')}</p>
-        </div>
+        </EmptyState>
       ) : null}
       <ConnectDesktop />
       {revoking ? (

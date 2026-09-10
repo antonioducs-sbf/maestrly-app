@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Cpu, Radio, Trash2 } from 'lucide-react'
+import { Cpu, Trash2 } from 'lucide-react'
 import type { RepositoryBinding } from '@maestrly/protocol'
 import { api, write } from '../../app/api.js'
 import { t, useLocale, errorText, dateTime } from '../../i18n/index.js'
 import { FormDialog } from '../../components/FormDialog.js'
+import { EmptyState } from '../../components/EmptyState.js'
 interface RunnerView {
   id: string
   name: string
@@ -101,11 +102,9 @@ export function RunnersPanel({
         </div>
       ) : null}
       {runners.length === 0 ? (
-        <div className="empty">
-          <Radio />
-          <h3>{t('No runner is enrolled')}</h3>
+        <EmptyState title={t('No runner is enrolled')}>
           <p>{t('Enroll a runner to execute work in an approved local repository.')}</p>
-        </div>
+        </EmptyState>
       ) : (
         <div className="data-list runner-list">
           {runners.map((runner) => (

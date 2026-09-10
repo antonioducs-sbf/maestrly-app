@@ -5,6 +5,7 @@ import { api, write } from '../../app/api.js'
 import { t, useLocale, errorText } from '../../i18n/index.js'
 import { FormDialog } from '../../components/FormDialog.js'
 import { Select } from '../../components/Select.js'
+import { EmptyState } from '../../components/EmptyState.js'
 const roles: ProjectRole[] = ['viewer', 'contributor', 'maintainer']
 export function TeamPanel({
   organizationId,
@@ -189,7 +190,7 @@ export function TeamPanel({
           </article>
         ))}
       </div>
-      {!filtered.length ? <p className="empty">{t('No matching members.')}</p> : null}
+      {!filtered.length ? <EmptyState title={t('No matching members.')} /> : null}
       <p className="form-note">
         {t('Owners and administrators inherit access from the organization. Their access cannot be removed here.')}
       </p>

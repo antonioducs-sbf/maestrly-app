@@ -21,6 +21,7 @@ import { AutomationPanel } from '../features/automations/AutomationPanel.js'
 import { RunnersPanel } from '../features/runners/RunnersPanel.js'
 import { OperationsPanel } from '../features/executions/OperationsPanel.js'
 import { ReportsPanel } from '../features/reports/ReportsPanel.js'
+import { EmptyState } from '../components/EmptyState.js'
 
 interface Session {
   user: { id: string; name: string; email: string }
@@ -84,7 +85,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
   const [desktopCollapsed,setDesktopCollapsed]=useState(()=>{try{return localStorage.getItem('maestrly-sidebar-collapsed')==='true'}catch{return false}})
   const [smallScreen,setSmallScreen]=useState(()=>window.matchMedia('(max-width: 850px)').matches)
   const [mobileOpen,setMobileOpen]=useState(false)
-  const [sidebarTooltip,setSidebarTooltip]=useState<{text:string;x:number;y:number}|null>(null)
+  const [sidebarTooltip,setSidebarTooltip]=useState<{text:string;x:number;y:number;source:'hover'|'focus'}|null>(null)
   const collapsed=smallScreen?!mobileOpen:desktopCollapsed
   useEffect(()=>{
     const media=window.matchMedia('(max-width: 850px)')
@@ -97,14 +98,16 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
     else {setDesktopCollapsed(!open);try{localStorage.setItem('maestrly-sidebar-collapsed',String(!open))}catch{}}
     setSidebarTooltip(null)
   }
-  function showSidebarTooltip(event:SyntheticEvent) {
+  function showSidebarTooltip(event:SyntheticEvent,source:'hover'|'focus') {
     const target=event.target
     if(!(target instanceof Element))return
     const button=target.closest<HTMLElement>('[data-sidebar-tooltip]')
     if(!button)return
     const rect=button.getBoundingClientRect()
-    setSidebarTooltip({text:button.dataset.sidebarTooltip??'',x:rect.right+10,y:Math.max(8,Math.min(rect.top,innerHeight-48))})
+    setSidebarTooltip({text:button.dataset.sidebarTooltip??'',x:rect.right+10,y:Math.max(8,Math.min(rect.top,innerHeight-48)),source})
   }
+  // A keyboard-focus tooltip must survive stray mouse events caused by the rail resizing under a still cursor.
+  const hideSidebarTooltip=(source?:'hover'|'focus')=>setSidebarTooltip(current=>current&&(!source||current.source===source)?null:current)
   const [organizations, setOrganizations] = useState<Organization[]>([])
   const [organizationId, setOrganizationId] = useState('')
   const [projects, setProjects] = useState<Array<Project & { currentRole?: 'maintainer' | 'contributor' | 'viewer' }>>(
@@ -326,7 +329,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
       ) : null}
       {smallScreen&&mobileOpen?<button className="sidebar-backdrop" aria-label={t('Close sidebar')} onClick={()=>setSidebarOpen(false)}/>:null}
       {sidebarTooltip?createPortal(<div className="sidebar-tooltip" role="tooltip" style={{left:sidebarTooltip.x,top:sidebarTooltip.y}}>{sidebarTooltip.text}</div>,document.body):null}
-      <aside id="project-sidebar" className="rail" onMouseOver={showSidebarTooltip} onMouseLeave={()=>setSidebarTooltip(null)} onFocusCapture={showSidebarTooltip} onBlurCapture={()=>setSidebarTooltip(null)} onPointerDown={()=>setSidebarTooltip(null)}>
+      <aside id="project-sidebar" className="rail" onMouseOver={(event)=>{if(!sidebarTooltip||sidebarTooltip.source==='hover')showSidebarTooltip(event,'hover')}} onMouseLeave={()=>hideSidebarTooltip('hover')} onFocusCapture={(event)=>showSidebarTooltip(event,'focus')} onBlurCapture={()=>hideSidebarTooltip('focus')} onPointerDown={()=>hideSidebarTooltip()}>
         <div className="sidebar-header">
           <div className="workspace-brand" id="project-sidebar-content">
           <img className="brand-symbol small" src="/brand/mark-full.svg" alt="" />
@@ -435,19 +438,22 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
         <div className="view-content">
           {loadError ? <p role="alert">{t(loadError)}</p> : null}
           {!organizationId ? (
-            <div className="empty">
-              <h2>{t('No organization access')}</h2>
+            <EmptyState heading="h2" title={t('No organization access')}>
               <p>{t('Ask an administrator for an invitation link.')}</p>
-            </div>
+            </EmptyState>
           ) : null}
           {organizationId && !projectId ? (
-            <div className="empty">
-              <h2>{t('No projects yet')}</h2>
+            <EmptyState
+              heading="h2"
+              title={t('No projects yet')}
+              action={
+                <button className="primary" onClick={() => setCreatingProject(true)}>
+                  {t('Create first project')}
+                </button>
+              }
+            >
               <p>{t('Create a project to start a delivery board.')}</p>
-              <button className="primary" onClick={() => setCreatingProject(true)}>
-                {t('Create first project')}
-              </button>
-            </div>
+            </EmptyState>
           ) : null}
           {projectId && view === 'board' && snapshot && snapshot.board.id === boardId ? (
             <BoardView
@@ -462,10 +468,9 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           ) : null}
           {projectId && view === 'automations' && snapshot ? (
             !canManage ? (
-              <div className="empty">
-                <h2>{t('Read-only project')}</h2>
+              <EmptyState heading="h2" title={t('Read-only project')}>
                 <p>{t('A maintainer manages automation policies.')}</p>
-              </div>
+              </EmptyState>
             ) : (
               <AutomationPanel
                 key={projectId+boardId}

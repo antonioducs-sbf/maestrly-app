@@ -13,6 +13,7 @@ import { FormDialog } from '../../components/FormDialog.js'
 import { MarkdownEditor } from '../../components/Markdown.js'
 import { CardDialog } from '../cards/CardDialog.js'
 import { ColumnControls } from './ColumnControls.js'
+import { EmptyState } from '../../components/EmptyState.js'
 
 export interface BoardSnapshot {
   board: Board
@@ -180,10 +181,9 @@ export function BoardView({
         </p>
       ) : null}
       {!snapshot.columns.length ? (
-        <div className="empty">
-          <h3>{t('No columns yet.')}</h3>
+        <EmptyState title={t('No columns yet.')}>
           <p>{t('Add a column to start organizing cards.')}</p>
-        </div>
+        </EmptyState>
       ) : null}
       <section className={'board ' + (layout === 'list' ? 'board-list' : '')} aria-label={snapshot.board.name}>
         {snapshot.columns.map((column, columnIndex) => {

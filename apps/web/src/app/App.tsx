@@ -7,7 +7,7 @@ import { t, useLocale, LanguageSelector } from '../i18n/index.js'
 import { FormDialog } from '../components/FormDialog.js'
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeftClose, PanelLeftOpen, FolderKanban, Languages, Cpu, Monitor } from 'lucide-react'
+import { Activity, Bot, Columns3, LogOut, Moon, Sun, Users, BarChart3, GitBranch, PanelLeft, FolderKanban, Languages, Cpu, Monitor } from 'lucide-react'
 import type { Project, Board } from '@maestrly/protocol'
 import { api, write } from './api.js'
 import { Login } from '../features/auth/Login.js'
@@ -332,12 +332,12 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
       <aside id="project-sidebar" className="rail" onMouseOver={(event)=>{if(!sidebarTooltip||sidebarTooltip.source==='hover')showSidebarTooltip(event,'hover')}} onMouseLeave={()=>hideSidebarTooltip('hover')} onFocusCapture={(event)=>showSidebarTooltip(event,'focus')} onBlurCapture={()=>hideSidebarTooltip('focus')} onPointerDown={()=>hideSidebarTooltip()}>
         <div className="sidebar-header">
           <div className="workspace-brand" id="project-sidebar-content">
-          <img className="brand-symbol small" src="/brand/mark-full.svg" alt="" />
+          <img className="brand-symbol" src="/brand/mark-full.svg" alt="" />
           <strong>maestrly</strong>
           <small>WORK</small>
         </div>
           <button type="button" className="sidebar-toggle" aria-label={t(collapsed?'Open sidebar':'Close sidebar')} title={collapsed?undefined:t('Close sidebar')} data-sidebar-tooltip={collapsed?t('Open sidebar'):undefined} aria-expanded={!collapsed} aria-controls="project-sidebar" onClick={()=>setSidebarOpen(collapsed)}>
-          {collapsed?<PanelLeftOpen size={18} strokeWidth={1.75}/>:<PanelLeftClose size={18} strokeWidth={1.75}/>}
+          <PanelLeft size={18} strokeWidth={1.75}/>
         </button>
         </div>
         {collapsed?<button className="sidebar-project-shortcut" aria-label={t('Project')+': '+(activeProject?.name??'—')} data-sidebar-tooltip={t('Project')+': '+(activeProject?.name??'—')} onClick={()=>setSidebarOpen(true)}><FolderKanban size={20}/></button>:null}

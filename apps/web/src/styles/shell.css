@@ -19,7 +19,7 @@
     height: 100vh;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 22px 14px 18px;
+    padding: 16px 14px 18px;
     background: var(--rail);
     color: var(--rail-muted);
     display: flex;
@@ -30,15 +30,14 @@
   :root[data-theme="dark"] .rail { border-right-color: var(--line); }
   .rail button { border: 0; background: transparent; color: var(--rail-muted); overflow-wrap: anywhere; }
   .rail button:focus-visible { outline-color: var(--rail-brass); }
-  .rail .sidebar-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; margin-bottom: 20px; flex-shrink: 0; }
-  .workspace-brand { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0; color: var(--rail-ink); }
-  .workspace-brand .brand-symbol { display: block; width: 28px; height: 28px; padding: 0; margin: 0; background: none; object-fit: contain; }
-  .workspace-brand strong { font-family: var(--font-display); font-size: 20px; font-weight: 500; letter-spacing: -0.03em; color: var(--rail-ink); }
+  .rail .sidebar-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; height: 36px; margin: 0 0 18px; flex-shrink: 0; }
+  .workspace-brand { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 0 0 0 12px; color: var(--rail-ink); }
+  .workspace-brand .brand-symbol { display: block; width: 26px; height: 26px; padding: 0; margin: 0; border-radius: 0; background: none; object-fit: contain; }
+  .workspace-brand strong { font-family: var(--font-display); font-size: 19px; line-height: 1; font-weight: 500; letter-spacing: -0.03em; color: var(--rail-ink); }
   .workspace-brand small { display: none; }
-  /* The toggle is a quiet utility, not a nav item: hover only brightens the glyph, no box. */
-  .rail .sidebar-toggle { display: grid; place-items: center; width: 30px; min-height: 30px; flex-shrink: 0; padding: 5px; margin: 0; border-radius: var(--radius-s); color: #6f746d; cursor: pointer; transition: color var(--dur-fast); }
-  .rail .sidebar-toggle:hover { color: var(--rail-ink); }
-  .rail .sidebar-project-shortcut:hover, .rail .sidebar-language-shortcut:hover { background: var(--rail-hover); color: var(--rail-ink); }
+  /* Toggle: a quiet rounded square, like a system control, not a nav item. */
+  .rail .sidebar-toggle { display: grid; place-items: center; width: 34px; height: 34px; min-height: 34px; flex-shrink: 0; padding: 0; margin: 0; border-radius: 9px; background: var(--rail-raised); border: 1px solid var(--rail-line); color: var(--rail-muted); cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
+  .rail .sidebar-toggle:hover { background: var(--rail-active); color: var(--rail-ink); }
   .rail .sidebar-project-shortcut { display: grid; place-items: center; width: 100%; min-height: 44px; margin-bottom: 12px; border-radius: var(--radius-s); color: var(--rail-brass); }
 
   .rail .sidebar-projects { margin: 0 0 6px; padding: 10px 10px 12px; border: 1px solid var(--rail-line); background: var(--rail-raised); border-radius: var(--radius-m); }
@@ -103,7 +102,7 @@
   .sidebar-backdrop { display: none; }
 
   /* Collapsed rail: icons only. */
-  .sidebar-collapsed .rail { padding: 20px 8px; }
+  .sidebar-collapsed .rail { padding: 16px 8px; }
   .sidebar-collapsed .rail .sidebar-header { justify-content: center; margin-bottom: 16px; }
   .sidebar-collapsed .workspace-brand, .sidebar-collapsed .sidebar-projects, .sidebar-collapsed .nav-caption, .sidebar-collapsed .rail-bottom .language-selector { display: none; }
   .sidebar-collapsed .rail nav button { justify-content: center; padding: 12px 4px; min-height: 44px; }

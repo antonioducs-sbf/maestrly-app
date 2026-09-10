@@ -74,6 +74,8 @@
   .form-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
   .form-error { color: var(--brick); font-size: 13px; }
   .success-message { color: var(--moss); font-size: 13px; }
+  /* Brand mark on entry screens; the rail restyles it inline. */
+  .brand-symbol { display: block; width: 68px; height: 68px; padding: 10px; border-radius: var(--radius-l); background: var(--rail); object-fit: contain; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   [hidden] { display: none !important; }
   * { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }

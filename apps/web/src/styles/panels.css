@@ -138,8 +138,6 @@
   /* ---- Entry screens (login, device approval, boot) ---------------------- */
   .login-shell, .device-shell, .boot-screen { min-height: calc(100vh - 49px); }
   .boot-screen { display: grid; place-content: center; justify-items: center; gap: 30px; color: var(--muted); }
-  .brand-symbol { display: block; width: 68px; height: 68px; padding: 10px; border-radius: var(--radius-l); background: var(--rail); object-fit: contain; }
-  .brand-symbol.small { width: 44px; height: 44px; padding: 5px; margin: 18px auto 30px; }
   .login-atmosphere { position: fixed; inset: 0; z-index: -1; background: url(/brand/login-atmosphere.jpg) center / cover no-repeat; opacity: 0.1; pointer-events: none; }
   :root[data-theme="dark"] .login-atmosphere { opacity: 0.4; }
   .login-shell { position: relative; isolation: isolate; display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 400px); justify-content: center; align-content: center; align-items: center; gap: 72px; padding: 48px 32px; }

@@ -1,4 +1,6 @@
 import { DesktopChatExecutor, DesktopModelCatalog } from './desktop-executor'
+import { ProjectChatWorker } from './project-chat-worker'
+import { DesktopProjectChatClient } from './project-chat-client'
 import { executorSettings, saveExecutorSettings } from './executor-settings'
 import path from 'node:path'
 import os from 'node:os'
@@ -130,6 +132,8 @@ class DesktopRunnerServer implements RunnerServer {
 
 export class EmbeddedRunnerHost {
   private engine: RunnerEngine | null = null
+  private chatWorker:ProjectChatWorker|null=null
+  private chatLoop:Promise<void>|null=null
   private server: DesktopRunnerServer | null = null
   private loop: Promise<void> | null = null
   private state: EmbeddedRunnerView = { state: 'stopped' }
@@ -272,6 +276,16 @@ export class EmbeddedRunnerHost {
         mode: settings.mode,
       }
       saveExecutorSettings({ ...settings, connectionId })
+      if(!settings.interactiveChat){
+        await new DesktopProjectChatClient(connection.url,identity).inventory({capability:'chat:interactive:v1',enabled:false,workspaces:[],models:[],integrations:{memory:false,skills:false,mcp:false}}).catch(error=>{if((error as {status?:number}).status!==404)throw error})
+      }
+      if(settings.interactiveChat){
+        const chatClient=new DesktopProjectChatClient(connection.url,identity)
+        const chatWorker=new ProjectChatWorker(chatClient,catalog,settings,bindings,connection.instanceId??connection.url,connection.url)
+        await chatClient.inventory(await chatWorker.inventory())
+        this.chatWorker=chatWorker
+        this.chatLoop=chatWorker.run().catch(error=>{this.state={state:'error',error:(error as Error).message};this.stopping=true;void engine.stop()})
+      }
       this.heartbeat = setInterval(
         () =>
           void server
@@ -323,12 +337,15 @@ export class EmbeddedRunnerHost {
   async stop() {
     this.revision++
     this.stopping = true
+    this.chatWorker?.stop()
     if (this.heartbeat) clearInterval(this.heartbeat)
     this.heartbeat = null
     const offline = this.server?.presence(false).catch(() => {})
     this.server = null
     await this.engine?.stop('Executor was stopped.')
     await this.loop
+    await this.chatLoop
+    this.chatWorker=null;this.chatLoop=null
     await offline
     this.engine = null
     this.loop = null

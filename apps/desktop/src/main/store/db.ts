@@ -169,6 +169,20 @@ export function initStore(file?: string): void {
 }
 
 function initializeSchema(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS platform_chat_sessions (
+      instance_id TEXT NOT NULL, session_id TEXT NOT NULL, conversation_id TEXT NOT NULL UNIQUE,
+      PRIMARY KEY(instance_id, session_id)
+    );
+    CREATE TABLE IF NOT EXISTS platform_chat_turns (
+      turn_id TEXT PRIMARY KEY, instance_id TEXT NOT NULL, lease_id TEXT NOT NULL,
+      state TEXT NOT NULL, completion TEXT
+    );
+    CREATE TABLE IF NOT EXISTS platform_chat_outbox (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS platform_chat_outbox_turn ON platform_chat_outbox(turn_id,seq);
+  `)
   // Drop known ledger triggers before schema creation because IF NOT EXISTS would preserve an outdated
   // privacy implementation.
   db.exec(`

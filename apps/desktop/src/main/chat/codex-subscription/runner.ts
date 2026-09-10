@@ -1,4 +1,6 @@
 import { autonomousPolicy,interactiveTool,AUTONOMOUS_INSTRUCTIONS,withAutonomousPolicy } from '../autonomous'
+import { remoteChatPolicy, withRemoteChatPolicy } from '../remote-policy'
+import { emitChatHost } from '../host-events'
 import { createHash, randomUUID } from 'node:crypto'
 import { asSchema } from '@ai-sdk/provider-utils'
 import { jsonSchema, tool, type Tool, type ToolSet } from 'ai'
@@ -1976,6 +1978,8 @@ async function buildDynamicTools(
     }
     if(autonomousPolicy(args.conversationId))for(let i=runtimes.length-1;i>=0;i--){if(interactiveTool(runtimes[i].spec.name))runtimes.splice(i,1)}
     const policy=autonomousPolicy(args.conversationId)
+    const remotePolicy=remoteChatPolicy(args.conversationId)
+    if(remotePolicy)for(const runtime of runtimes){const execute=runtime.execute;runtime.execute=(...a)=>withRemoteChatPolicy(remotePolicy,()=>execute(...a))}
     if(policy)for(const runtime of runtimes){const execute=runtime.execute;runtime.execute=(...args)=>withAutonomousPolicy(policy,()=>execute(...args))}
     runtimes.sort((a, b) => a.spec.name.localeCompare(b.spec.name))
     return {
@@ -2523,6 +2527,7 @@ export async function runCodexSubscriptionChat(
     // Default modes used by Agent/Ask without duplicating it as a dynamic tool.
     config: {
       ...DEFAULT_MODE_REQUEST_USER_INPUT_CONFIG,
+      ...(remoteChatPolicy(args.conversationId)?{'features.apps':false,'features.plugins':false,'features.tool_suggest':false,'features.shell_tool':false,web_search:'disabled'}:{}),
       ...(autonomousPolicy(args.conversationId)?{'features.default_mode_request_user_input':false,'features.apps':false,'features.plugins':false,'features.tool_suggest':false}:{}),
       ...(runtimeProfile.nativeCompactionFirst ? {} : ROOT_THREAD_NATIVE_AUTO_COMPACTION_CONFIG),
       ...(runtimeProfile.experimentalContextEnabled
@@ -4491,6 +4496,7 @@ export async function runCodexSubscriptionChat(
         if (typeof params.delta === 'string') {
           progress.set(itemId, (progress.get(itemId) ?? '') + params.delta)
           apply({ kind: 'reasoning-delta', messageId: assistantId, partId: itemId, delta: params.delta })
+          emitChatHost(args.conversationId,'chat:public-summary',{messageId:assistantId,partId:itemId,delta:params.delta})
         }
         return
       }
@@ -4550,6 +4556,7 @@ export async function runCodexSubscriptionChat(
             startedReasoning.add(item.id)
             apply({ kind: 'reasoning-start', messageId: assistantId, partId: item.id })
             apply({ kind: 'reasoning-delta', messageId: assistantId, partId: item.id, delta: summary })
+            emitChatHost(args.conversationId,'chat:public-summary',{messageId:assistantId,partId:item.id,delta:summary})
           }
           return
         }

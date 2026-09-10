@@ -77,6 +77,7 @@ export function ExecutorSection({ connections }: { connections: PlatformConnecti
       cancelled: L('Cancelled', 'Cancelado'),
     })[value] ?? value
   const controls: Array<[keyof DesktopExecutorSettings, string, string]> = [
+    ['interactiveChat', 'Interactive project chat in the web', 'Chat interativo do projeto na web'],
     ['allowCommands', 'Run commands on this machine', 'Executar comandos nesta máquina'],
     ['allowAppTools', 'App tools: browser, terminal and notes', 'Ferramentas do app: browser, terminal e notas'],
     ['allowWeb', 'Web and browser access', 'Acessar web e browser'],

@@ -1,4 +1,5 @@
 import { autonomousPolicy,assertAutonomousPermission } from './autonomous'
+import { remoteChatPolicy, assertRemoteChatPermission, isWebManagedConversation } from './remote-policy'
 /**
  * BYOK chat tool permission broker. Faithfully ported without Effect from opencode `permission.ts`
  * + `permission/saved.ts` + `util/wildcard.ts`.
@@ -237,9 +238,13 @@ export class PermissionBroker extends EventEmitter {
    */
   async assertDecision(input: AssertInput): Promise<'once' | 'always'> {
     if (input.signal?.aborted) throw new PermissionCancelledError()
+    const remote=remoteChatPolicy(input.conversationId)
+    if(!remote&&isWebManagedConversation(input.conversationId))throw new Error('Remote conversation has no active lease.')
+    const remoteEffect=remote?assertRemoteChatPermission(remote,input):null
+    if(remoteEffect==='read')return 'once'
     const autonomous=autonomousPolicy(input.conversationId)
     if(autonomous){assertAutonomousPermission(autonomous,input);return 'once'}
-    const r = this.evaluateInput(input)
+    const r = remoteEffect==='ask'?{effect:'ask' as const,rules:[]}:this.evaluateInput(input)
     if (r.effect === 'deny') throw new DeniedError(r.rules)
     if (r.effect === 'allow') return 'once'
     const req = this.buildRequest(input)
@@ -281,6 +286,7 @@ export class PermissionBroker extends EventEmitter {
   reply(input: ReplyInput): void {
     const existing = this.pending.get(input.requestId)
     if (!existing) return
+    if(input.reply==='always'&&(remoteChatPolicy(existing.request.conversationId)||isWebManagedConversation(existing.request.conversationId)))throw new Error('Web chat permissions are valid for one operation only.')
 
     if (input.reply === 'reject') {
       this.emitResolved(existing.request, 'deny')

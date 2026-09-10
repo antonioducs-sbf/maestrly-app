@@ -12,7 +12,7 @@ describe('multi-account selection surfaces', () => {
 
     expect(chip).toContain('providerId: p.id, providerName: p.name')
     expect(chip).toMatch(/key=\{`\$\{r\.providerId\}::\$\{r\.modelId\}`\}/)
-    expect(settings.match(/<option key=\{p\.id\} value=\{p\.id\}>/g)).toHaveLength(2)
+    expect(settings.match(/<SelectOption key=\{p\.id\} value=\{p\.id\}>/g)).toHaveLength(2)
     expect(review).toContain('<SelectItem key={provider.id} value={provider.id}>')
     expect(review).toContain('{provider.name}')
     expect(candidate).toContain('id: provider.id')

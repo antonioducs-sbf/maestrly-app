@@ -1,4 +1,5 @@
 import {autonomousPolicy} from '../autonomous'
+import {remoteChatPolicy} from '../remote-policy'
 import { randomUUID } from 'node:crypto'
 import type { ChatModelRef } from '../../../shared/chat'
 import type { SubagentExecutionSnapshotV1 } from '../../../shared/subagent-profiles'
@@ -445,7 +446,7 @@ export async function runCodexSubagent(args: RunCodexSubagentArgs): Promise<Code
           // visible in the parent message, so they must disable it explicitly.
           'features.image_generation': false,
           ...nativeSubagentSuppressionConfig(),
-          ...(autonomousPolicy('')?{'features.shell_tool':false,web_search:'disabled','features.default_mode_request_user_input':false,'features.apps':false,'features.plugins':false,'skills.include_instructions':false,'features.skill_mcp_dependency_install':false}:{}),
+          ...(autonomousPolicy('')||remoteChatPolicy('')?{'features.shell_tool':false,web_search:'disabled','features.default_mode_request_user_input':false,'features.apps':false,'features.plugins':false,'skills.include_instructions':false,'features.skill_mcp_dependency_install':false}:{}),
           ...(args.readOnly ? { 'features.shell_tool': false, web_search: 'disabled' } : {}),
         },
         developerInstructions: [

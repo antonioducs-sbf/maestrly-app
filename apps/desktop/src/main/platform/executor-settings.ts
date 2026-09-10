@@ -13,6 +13,7 @@ export const desktopExecutorSettingsSchema = z
     allowMcp: z.boolean().default(false),
     allowPush: z.boolean().default(false),
     skills: z.boolean().default(true),
+    interactiveChat: z.boolean().default(false),
   })
   .strict()
 export type DesktopExecutorSettings = z.infer<typeof desktopExecutorSettingsSchema>

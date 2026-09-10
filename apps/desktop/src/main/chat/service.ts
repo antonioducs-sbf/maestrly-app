@@ -1,4 +1,6 @@
 import { autonomousPolicy } from './autonomous'
+import { emitChatHost } from './host-events'
+import { isWebManagedConversation, remoteChatPolicy } from './remote-policy'
 /**
  * BYOK chat service in main: registers `chat:*` IPC channels, orchestrates the runner per conversation,
  * forwards permission broker events to the renderer, and maintains conversation status (working/ready).
@@ -550,6 +552,7 @@ function chatConversationIdFromChannel(channel: string): string | null {
 /** Sends render-only events to current consumers and counts only actual sends. */
 function sendChatEvent(wc: WebContents, channel: string, payload: unknown): void {
   const conversationId = chatConversationIdFromChannel(channel)
+  if(conversationId)emitChatHost(conversationId,channel,payload)
   if (conversationId !== null && !hasChatSubscriber(wc, conversationId)) return
   if (wc.isDestroyed()) {
     if (conversationId !== null) clearChatSubscriptions(wc)
@@ -3043,6 +3046,7 @@ async function currentChatHistoryStats(
 
 /** Internal send options (used by plan decision turns; not exposed to user IPC). */
 interface StartSendOpts {
+  remoteAdmission?:boolean
   runnerAdmission?: (run:ActiveRun)=>void
   runnerSignal?:AbortSignal
 
@@ -3098,6 +3102,7 @@ async function startSend(
   // COMPANION AUTOMATION LOCK (central guard): while review/bootstrap is active, only its owning internal turn
   // passes. Covers chat:send, resend, plans, and server-side starts — all enter here.
   if(opts?.runnerSignal?.aborted)return {ok:false,error:'cancelled'}
+  if(isWebManagedConversation(conversationId)&&!opts?.remoteAdmission)return {ok:false,error:'This conversation is managed in the Kanban web chat.'}
   if(autonomousPolicy(conversationId)&&!opts?.runnerAdmission&&!opts?.internal)return {ok:false,error:'executor-active'}
   const internalLoop = opts?.internalLoop
   const internalTurnMode = internalLoop?.turnPolicy === 'reviewer-readonly' ? ('ask' as const) : ('agent' as const)
@@ -7442,6 +7447,7 @@ export function registerChatIpc(deps: ChatIpcDeps): void {
     'chat:steer',
     async (_e, rawConversationId: unknown, rawText: unknown, rawClientUserMessageId: unknown) => {
       const conversationId = typeof rawConversationId === 'string' ? rawConversationId : ''
+      if(isWebManagedConversation(conversationId))return {ok:false,error:'This conversation is managed in the Kanban web chat.'}
       const text = typeof rawText === 'string' ? rawText : ''
       const clientUserMessageId = typeof rawClientUserMessageId === 'string' ? rawClientUserMessageId : ''
       if (
@@ -8675,6 +8681,7 @@ export function registerChatIpc(deps: ChatIpcDeps): void {
       }
     ) => {
       const { conversationId, fromMessageId, text } = payload ?? {}
+      if(isWebManagedConversation(conversationId))return {ok:false,error:'This conversation is managed in the Kanban web chat.'}
       if (typeof conversationId !== 'string' || typeof fromMessageId !== 'string')
         return { ok: false, error: 'invalid-input' }
       const operation = reserveConversationOperation(conversationId, selectionFor(conversationId)?.providerId ?? null)
@@ -8713,11 +8720,14 @@ export function registerChatIpc(deps: ChatIpcDeps): void {
   deps.mon(
     'chat:permission-respond',
     (_e, requestId: string, reply: 'once' | 'always' | 'reject', message?: string) => {
+      for(const conversationId of active.keys())if(isWebManagedConversation(conversationId)&&getBroker().pendingFor(conversationId).some(p=>p.id===requestId))return
       if (typeof requestId === 'string') getBroker().reply({ requestId, reply, message })
     }
   )
   // ask_question (mark X): user answers (string[][]) → resolve the tool's blocked execute.
   deps.mon('chat:question-respond', (_e, toolCallId: string, answers: string[][]) => {
+    const owner=getQuestionBroker().conversationFor(toolCallId)
+    if(owner&&isWebManagedConversation(owner))return
     if (typeof toolCallId === 'string') getQuestionBroker().reply(toolCallId, Array.isArray(answers) ? answers : [])
   })
 }
@@ -8791,7 +8801,7 @@ export function disposeChat(): Promise<void> {
 }
 
 /** Host-only execution entry point: full chat engine and persistence, with an admission-safe handle. */
-export async function startExecutorChatTurn(input:{conversationId:string;prompt:string;signal:AbortSignal}):Promise<InternalTurnHandle>{
+export async function startExecutorChatTurn(input:{conversationId:string;prompt:string;signal:AbortSignal;remoteAdmission?:boolean}):Promise<InternalTurnHandle>{
  if(!savedDeps)throw new Error('Chat service not initialized')
  const wc=getMainWebContents();if(!wc)throw new Error('Desktop window unavailable')
  let handle:InternalTurnHandle|undefined
@@ -8799,7 +8809,8 @@ export async function startExecutorChatTurn(input:{conversationId:string;prompt:
  const cancel=()=>{admitted?.controller.abort();getBroker().rejectConversation(input.conversationId);getQuestionBroker().rejectConversation(input.conversationId)}
  input.signal.addEventListener('abort',cancel,{once:true})
  try{
-  const result=await startSend(savedDeps,wc,input.conversationId,input.prompt,undefined,{runnerSignal:input.signal,runnerAdmission:run=>{
+  if(input.remoteAdmission&&!remoteChatPolicy(input.conversationId))throw new Error('Remote chat policy is missing')
+  const result=await startSend(savedDeps,wc,input.conversationId,input.prompt,undefined,{remoteAdmission:input.remoteAdmission,runnerSignal:input.signal,runnerAdmission:run=>{
    admitted=run
    if(input.signal.aborted)cancel()
    handle={executionId:input.conversationId,conversationId:input.conversationId,assistantMessageId:()=>run.messageId||null,done:run.outcome,cancel}

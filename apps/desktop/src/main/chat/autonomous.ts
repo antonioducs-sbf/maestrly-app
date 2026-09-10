@@ -1,4 +1,5 @@
 import type {ToolSet} from 'ai'
+import { governRemoteChatTools, remoteChatPolicy } from './remote-policy'
 import { APP_TOOL_POLICY } from './tool-policy'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
@@ -37,11 +38,14 @@ export class AutonomousInteractionError extends Error {
   }
 }
 export function autonomousProviderAllowed(providerId: string, conversationId = ''): boolean {
+  const remote=remoteChatPolicy(conversationId)
+  if(remote&&!remote.providerIds.includes(providerId))return false
   const policy = autonomousPolicy(conversationId)
   return !policy?.providerIds || policy.providerIds.includes(providerId)
 }
 /** Capture policy at admission: provider SDK callbacks may run outside the original async context. */
 export function governAutonomousTools(tools:ToolSet,conversationId:string):void {
+  governRemoteChatTools(tools,conversationId)
   const policy=autonomousPolicy(conversationId)
   if(!policy)return
   for(const name of Object.keys(tools)){

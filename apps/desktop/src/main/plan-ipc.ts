@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { isWebManagedConversation } from './chat/remote-policy'
 import { constants as fsConstants, promises as fsp } from 'node:fs'
 import * as floatingManager from './floating-manager'
 import { excludeFromGitInfo } from './git-service'
@@ -49,6 +50,7 @@ function positiveLine(value: unknown): number | undefined {
 
 export function registerPlanIpc(reg: IpcRegistrar, deps: PlanIpcDeps): void {
   reg.mhandle('plan:decide', (_e, agentId: string, decision: PlanDecision) => {
+    if(isWebManagedConversation(agentId))return {ok:false,error:'Decide this plan in the Kanban web chat.'}
     if (
       decision.implementationTarget !== undefined &&
       decision.implementationTarget !== 'source' &&

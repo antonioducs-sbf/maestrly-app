@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { registerProjectChatBoardTools } from '../../platform/project-chat-context'
 import { HttpTransport } from '@maestrly/client-sdk'
 import { z } from 'zod'
 import type { McpToolContext } from './context'
@@ -8,6 +9,7 @@ import { platformConnections } from '../../platform/connection-service'
 import { platformProjectBindings } from '../../platform/project-bindings'
 
 export function registerBoardTools(ctx: McpToolContext): void {
+  if(registerProjectChatBoardTools(ctx))return
   const conversation = getConversation(ctx.convId)
   const binding = conversation ? platformProjectBindings.forWorkspace(conversation.workspaceId) : null
   if (!binding) return

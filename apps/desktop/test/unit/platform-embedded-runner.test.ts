@@ -135,11 +135,12 @@ describe('embedded runner Git mapping', () => {
       )
       await host.stop()
       await host.start('connection')
-      expect(fixture.request).toHaveBeenLastCalledWith(
+      expect(fixture.request.mock.calls.filter(c => c[1] === '/api/v1/personal-devices').at(-1)).toEqual([
         'POST',
         '/api/v1/personal-devices',
         expect.objectContaining({ body: expect.objectContaining({ deviceId: 'personal-runner' }) })
-      )
+      ])
+      expect(fixture.request).toHaveBeenCalledWith('POST', '/api/v1/runners/chat/inventory', expect.objectContaining({body: expect.objectContaining({enabled:false})}))
       await host.stop()
       fixture.owner = 'user-b'
       await host.start('connection')

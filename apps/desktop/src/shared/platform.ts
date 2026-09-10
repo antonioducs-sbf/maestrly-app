@@ -43,6 +43,6 @@ export interface RemotePlatformProject {
 
 export interface DesktopExecutorSettings {
  mode:'personal'|'team';background:boolean;autoStart:boolean;connectionId?:string;providerIds:string[];
- allowCommands:boolean;allowWeb:boolean;allowAppTools:boolean;allowMcp:boolean;allowPush:boolean;skills:boolean;
+ allowCommands:boolean;allowWeb:boolean;allowAppTools:boolean;allowMcp:boolean;allowPush:boolean;skills:boolean;interactiveChat?:boolean;
 }
 export interface DesktopExecutionRecord {runId:string;cardId:string;title:string;conversationId:string;workspacePath:string;state:string;startedAt:number;summary?:string}

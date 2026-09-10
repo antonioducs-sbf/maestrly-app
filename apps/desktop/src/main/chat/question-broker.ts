@@ -1,4 +1,5 @@
 import { autonomousPolicy,AutonomousInteractionError } from './autonomous'
+import { emitChatHost } from './host-events'
 /**
  * Broker for ask_question options and free-text answers, following the PermissionBroker pattern.
  * Tool execution calls ask() and waits on a deferred promise until the user answers the chat card
@@ -56,6 +57,7 @@ export class QuestionBroker extends EventEmitter {
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
     this.emit('asked', { conversationId: input.conversationId, toolCallId: input.toolCallId })
+    emitChatHost(input.conversationId,'question',{toolCallId:input.toolCallId,questions:input.questions})
     return p
   }
 
@@ -81,6 +83,7 @@ export class QuestionBroker extends EventEmitter {
   pendingFor(conversationId: string): string[] {
     return [...this.pending.entries()].filter(([, p]) => p.conversationId === conversationId).map(([id]) => id)
   }
+  conversationFor(toolCallId:string):string|undefined{return this.pending.get(toolCallId)?.conversationId}
 
   /** Renderable snapshot of pending questions to remount ChatView without depending on missed deltas. */
   pendingQuestionsFor(conversationId: string): PendingChatQuestion[] {

@@ -99,6 +99,7 @@ const EXPECTED_TOOL_NAMES = [
 ] as const
 
 const LINKED_BOARD_TOOL_NAMES = [
+  'board_list_boards', 'board_get_board', 'board_search_cards', 'board_card_history', 'board_create_card',
   'board_comment',
   'board_create_subtask',
   'board_get_card',

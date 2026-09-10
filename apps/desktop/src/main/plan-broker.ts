@@ -1,4 +1,5 @@
 import { autonomousPolicy,AutonomousInteractionError } from './chat/autonomous'
+import { emitChatHost } from './chat/host-events'
 import * as windowIpc from './window-ipc'
 import { getLocale } from './store'
 import { tFor } from './i18n'
@@ -107,6 +108,7 @@ function notifyLifecycle(entry: Pending, outcome: PlanLifecycleOutcome): void {
 }
 
 function emitPlanEvent(agentId: string, channel: string, payload: unknown): void {
+  emitChatHost(agentId,channel,payload)
   // The main renderer still needs the event to focus the conversation; the plan panel receives the
   // same event directly so an unrelated conversation does not wake every panel renderer.
   if (typeof windowIpc.sendToConversation === 'function') {

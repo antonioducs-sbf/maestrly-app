@@ -26,6 +26,11 @@ const policy = (allowedInPlanAsk: boolean, readOnly: boolean, parallelSafe: bool
 /** Exhaustive product policy for the app-tool universe registered by buildServer. */
 export const APP_TOOL_POLICY = {
   board_list_cards: policy(true, true, true),
+  board_list_boards: policy(true, true, true),
+  board_get_board: policy(true, true, true),
+  board_search_cards: policy(true, true, true),
+  board_card_history: policy(true, true, true),
+  board_create_card: policy(false, false, false),
   board_get_card: policy(true, true, true),
   board_create_subtask: policy(false, false, false),
   board_update_card: policy(false, false, false),

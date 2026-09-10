@@ -1,6 +1,6 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, FolderOpen, GitBranch, Link2, Loader2 } from 'lucide-react'
+import { Check, FolderOpen, Link2, Loader2 } from 'lucide-react'
 import type { Workspace } from '../../../preload'
 import type { PlatformConnectionView, PlatformProjectBinding, RemotePlatformProject } from '../../../shared/platform'
 import { Button } from '../ui/button'
@@ -8,10 +8,55 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 
 const WITHOUT_CODE = 'without-code'
 
+type Blocker = 'project' | 'board' | 'folder' | 'occupied' | 'repository' | 'saved'
+
+/** Numbered step whose marker becomes a check once the step is complete. */
+function Step({
+  number,
+  done,
+  label,
+  htmlFor,
+  children,
+}: {
+  number: number
+  done: boolean
+  label: string
+  htmlFor?: string
+  children: ReactNode
+}) {
+  const marker = (
+    <span
+      aria-hidden="true"
+      className={`flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold ${
+        done ? 'bg-emerald-500/20 text-emerald-500' : 'border border-border text-muted-foreground'
+      }`}
+    >
+      {done ? <Check size={12} /> : number}
+    </span>
+  )
+  const title = htmlFor ? (
+    <label htmlFor={htmlFor} className="text-xs font-medium">
+      {label}
+    </label>
+  ) : (
+    <span className="text-xs font-medium">{label}</span>
+  )
+  return (
+    <div className="flex gap-3">
+      <div className="pt-0.5">{marker}</div>
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="flex h-5 items-center">{title}</div>
+        {children}
+      </div>
+    </div>
+  )
+}
+
 export function ProjectBindingSection({ connections }: { connections: PlatformConnectionView[] }) {
   const { i18n } = useTranslation()
   const L = (en: string, pt: string) => (i18n.language.startsWith('pt') ? pt : en)
   const id = useId()
+  const pickFolderRef = useRef<HTMLButtonElement>(null)
   const [connectionId, setConnectionId] = useState('')
   const connection =
     connections.find((c) => c.id === connectionId && c.state === 'connected') ??
@@ -81,7 +126,35 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
     !occupied &&
     existing.repositoryBindingId === (repositoryId === WITHOUT_CODE ? undefined : repositoryId)
   const linked = data.bindings.filter((b) => b.connectionId === connection.id)
-  const ready = !!project && !!workspace && !!project.boards.length && !!repositoryId && !occupied && !matchesSaved
+
+  // The single reason the link cannot be saved right now, in step order. Shown proactively and on click.
+  const blocker: Blocker | null = !project
+    ? 'project'
+    : !project.boards.length
+      ? 'board'
+      : !workspace
+        ? 'folder'
+        : occupied
+          ? 'occupied'
+          : !repositoryId
+            ? 'repository'
+            : matchesSaved
+              ? 'saved'
+              : null
+  const blockerText: Record<Blocker, string> = {
+    project: L('Select the Kanban project (step 1).', 'Selecione o projeto do Kanban (passo 1).'),
+    board: L(
+      'This project has no board yet. Create one in the Kanban first.',
+      'Este projeto ainda não tem um quadro. Crie um no Kanban antes.'
+    ),
+    folder: L('Choose the folder on this computer (step 2).', 'Escolha a pasta neste computador (passo 2).'),
+    occupied: L(
+      'This folder is already linked to another project. Choose another folder or remove that link below.',
+      'Esta pasta já está vinculada a outro projeto. Escolha outra pasta ou remova aquele vínculo abaixo.'
+    ),
+    repository: L('Select the code repository.', 'Selecione o repositório do código.'),
+    saved: L('This folder is already linked to this project.', 'Esta pasta já está vinculada a este projeto.'),
+  }
 
   function chooseProject(value: string) {
     const next = data.projects.find((p) => p.projectId === value)
@@ -128,8 +201,19 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
     setData((current) => ({ ...current, workspaces }))
     chooseWorkspace(selected.id)
   }
+  function submit() {
+    if (blocker) {
+      // Explain exactly what is missing and move the person to that step instead of a dead button.
+      setError(blockerText[blocker])
+      if (blocker === 'folder' || blocker === 'occupied') pickFolderRef.current?.focus()
+      else if (blocker === 'project') document.getElementById(`${id}-project`)?.focus()
+      else if (blocker === 'repository') document.getElementById(`${id}-repo`)?.focus()
+      return
+    }
+    void act('save', save)
+  }
   async function save() {
-    if (!ready || !connection || !project) return
+    if (!connection || !project) return
     await window.api.platformSetProjectBinding({
       workspaceId,
       connectionId: connection.id,
@@ -143,6 +227,12 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
     setRemoved(null)
     setEditing(false)
     setNotice('saved')
+  }
+  function stopEditing() {
+    setEditing(false)
+    setError('')
+    setFolderError('')
+    setNotice('')
   }
 
   return (
@@ -162,8 +252,8 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
           {L(
-            'Link a Kanban project to a local folder so this computer can execute its cards.',
-            'Vincule um projeto do Kanban a uma pasta local para que este computador possa executar os cards dele.'
+            'Tell this computer which local folder belongs to each Kanban project. Cards of that project can then run here.',
+            'Diga a este computador qual pasta local corresponde a cada projeto do Kanban. Os cards desse projeto poderão rodar aqui.'
           )}
         </p>
       </header>
@@ -222,10 +312,12 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
           {editing || !linked.length ? (
             <>
               <fieldset disabled={!!busy} className="min-w-0 space-y-5">
-                <div className="space-y-2">
-                  <label htmlFor={`${id}-project`} className="text-xs font-medium">
-                    {L('1. Kanban project', '1. Projeto do Kanban')}
-                  </label>
+                <Step
+                  number={1}
+                  done={!!project}
+                  label={L('Kanban project', 'Projeto do Kanban')}
+                  htmlFor={`${id}-project`}
+                >
                   <Select value={projectId} onValueChange={chooseProject}>
                     <SelectTrigger className="min-w-0 [&>span]:min-w-0 [&>span]:truncate" id={`${id}-project`}>
                       <SelectValue placeholder={L('Select a project…', 'Selecione um projeto…')} />
@@ -238,24 +330,24 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
                       ))}
                     </SelectContent>
                   </Select>
-                </div>
-                <div className="space-y-2">
-                  {data.workspaces.length ? (
-                    <label htmlFor={`${id}-folder`} className="text-xs font-medium">
-                      {L('2. Folder on this computer', '2. Pasta neste computador')}
-                    </label>
-                  ) : (
-                    <p className="text-xs font-medium">
-                      {L('2. Folder on this computer', '2. Pasta neste computador')}
+                  {project && !repositories.length ? (
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {L(
+                        'No code repository is registered for this project in the Kanban, so it will run analysis tasks only.',
+                        'Este projeto não tem repositório de código cadastrado no Kanban, então rodará apenas tarefas de análise.'
+                      )}
                     </p>
-                  )}
+                  ) : null}
+                </Step>
+                <Step
+                  number={2}
+                  done={!!workspace && !occupied}
+                  label={L('Folder on this computer', 'Pasta neste computador')}
+                  htmlFor={data.workspaces.length ? `${id}-folder` : undefined}
+                >
                   {data.workspaces.length ? (
-                    <Select value={workspaceId} onValueChange={chooseWorkspace} disabled={!project}>
-                      <SelectTrigger
-                        className="min-w-0 [&>span]:min-w-0 [&>span]:truncate"
-                        id={`${id}-folder`}
-                        aria-describedby={`${id}-folder-help`}
-                      >
+                    <Select value={workspaceId} onValueChange={chooseWorkspace}>
+                      <SelectTrigger className="min-w-0 [&>span]:min-w-0 [&>span]:truncate" id={`${id}-folder`}>
                         <SelectValue placeholder={L('Select a local folder…', 'Selecione uma pasta local…')}>
                           {workspace?.name}
                         </SelectValue>
@@ -271,161 +363,122 @@ export function ProjectBindingSection({ connections }: { connections: PlatformCo
                         ))}
                       </SelectContent>
                     </Select>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      {L('No local folder selected yet.', 'Nenhuma pasta local selecionada ainda.')}
-                    </p>
-                  )}
+                  ) : null}
                   {workspace ? (
                     <p className="break-all font-mono text-xs leading-relaxed text-muted-foreground" translate="no">
                       {workspace.path}
                     </p>
                   ) : null}
-                  <Button
-                    id={`${id}-pick-folder`}
-                    variant="outline"
-                    size="sm"
-                    disabled={!project}
-                    onClick={() => void act('folder', chooseFolder)}
-                  >
-                    <FolderOpen size={14} aria-hidden="true" />
-                    {L(
-                      workspace ? 'Choose another folder…' : 'Choose folder…',
-                      workspace ? 'Escolher outra pasta…' : 'Escolher pasta…'
-                    )}
-                  </Button>
-                  <p id={`${id}-folder-help`} className="text-xs leading-relaxed text-muted-foreground">
-                    {L(
-                      'Choose the folder of a Git repository already on this computer. Linking it does not download code or start a task.',
-                      'Escolha a pasta de um repositório Git que já está neste computador. Vincular não baixa o código nem inicia uma tarefa.'
-                    )}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button
+                      ref={pickFolderRef}
+                      id={`${id}-pick-folder`}
+                      variant={workspace ? 'outline' : 'default'}
+                      size="sm"
+                      onClick={() => void act('folder', chooseFolder)}
+                    >
+                      {busy === 'folder' ? (
+                        <Loader2 size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                      ) : (
+                        <FolderOpen size={14} aria-hidden="true" />
+                      )}
+                      {L(
+                        workspace ? 'Choose another folder…' : 'Choose folder…',
+                        workspace ? 'Escolher outra pasta…' : 'Escolher pasta…'
+                      )}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {L(
+                        'Must be a Git repository already on this Mac.',
+                        'Precisa ser um repositório Git que já está neste computador.'
+                      )}
+                    </span>
+                  </div>
                   {folderError ? (
                     <p role="alert" className="text-xs text-destructive">
                       {folderError}
                     </p>
+                  ) : occupied ? (
+                    <p role="alert" className="text-xs text-destructive">
+                      {blockerText.occupied}
+                    </p>
                   ) : null}
-                </div>
-                {project ? (
-                  <div className="space-y-2 border-t border-border pt-4">
-                    {repositories.length ? (
-                      <>
-                        <label htmlFor={`${id}-repo`} className="text-xs font-medium">
-                          {L('Code repository', 'Repositório do código')}
-                        </label>
-                        <Select
-                          value={repositoryId}
-                          onValueChange={(value) => {
-                            setRepositoryId(value)
-                            setNotice('')
-                            setError('')
-                            setFolderError('')
-                          }}
-                        >
-                          <SelectTrigger
-                            className="min-w-0 [&>span]:min-w-0 [&>span]:truncate"
-                            id={`${id}-repo`}
-                            aria-describedby={`${id}-repo-help`}
-                          >
-                            <SelectValue placeholder={L('Select a repository…', 'Selecione um repositório…')} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {repositories.map((r) => (
-                              <SelectItem key={r.id} value={r.id}>
-                                {r.name}
-                                {r.baseBranch ? ` · ${r.baseBranch}` : ''}
-                              </SelectItem>
-                            ))}
-                            <SelectItem value={WITHOUT_CODE}>
-                              {L('Tasks without code', 'Tarefas sem código')}
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p id={`${id}-repo-help`} className="text-xs leading-relaxed text-muted-foreground">
-                          {repositoryId === WITHOUT_CODE
-                            ? L(
-                                'Conversations are grouped under the selected folder. Tasks run in a separate folder without repository code.',
-                                'As conversas ficam agrupadas na pasta escolhida. As tarefas usam uma pasta separada, sem o código de um repositório.'
-                              )
-                            : L(
-                                'The selected local folder must contain this repository. The executor works in a separate copy of its committed code.',
-                                'A pasta local escolhida deve conter esse repositório. O executor trabalha em uma cópia separada do código salvo no Git.'
-                              )}
-                        </p>
-                      </>
-                    ) : (
-                      <div className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
-                        <GitBranch size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
-                        <p>
-                          {L(
-                            'This Kanban project has no code repository. This link supports analysis tasks. For code tasks, add a repository to the project in the Kanban.',
-                            'Este projeto do Kanban ainda não tem repositório de código. O vínculo permite tarefas de análise. Para trabalhar com código, cadastre o repositório no projeto do Kanban.'
+                </Step>
+                {repositories.length ? (
+                  <Step
+                    number={3}
+                    done={!!repositoryId}
+                    label={L('Code repository', 'Repositório do código')}
+                    htmlFor={`${id}-repo`}
+                  >
+                    <Select
+                      value={repositoryId}
+                      onValueChange={(value) => {
+                        setRepositoryId(value)
+                        setNotice('')
+                        setError('')
+                      }}
+                    >
+                      <SelectTrigger className="min-w-0 [&>span]:min-w-0 [&>span]:truncate" id={`${id}-repo`}>
+                        <SelectValue placeholder={L('Select a repository…', 'Selecione um repositório…')} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {repositories.map((r) => (
+                          <SelectItem key={r.id} value={r.id}>
+                            {r.name}
+                            {r.baseBranch ? ` · ${r.baseBranch}` : ''}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value={WITHOUT_CODE}>{L('Tasks without code', 'Tarefas sem código')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {repositoryId === WITHOUT_CODE
+                        ? L('Tasks run without repository code.', 'As tarefas rodam sem o código do repositório.')
+                        : L(
+                            'The folder in step 2 must contain this repository.',
+                            'A pasta do passo 2 precisa conter esse repositório.'
                           )}
-                        </p>
-                      </div>
-                    )}
-                  </div>
+                    </p>
+                  </Step>
                 ) : null}
               </fieldset>
-              {project && !project.boards.length ? (
-                <p role="alert" className="text-xs text-destructive">
-                  {L(
-                    'This project has no board yet. Create one in the Kanban before linking it.',
-                    'Este projeto ainda não tem um quadro. Crie um no Kanban antes de vincular.'
-                  )}
-                </p>
-              ) : null}
-              {occupied ? (
-                <p role="alert" className="text-xs text-destructive">
-                  {L(
-                    'This folder is already linked to another project. Choose another folder or remove its existing link below.',
-                    'Esta pasta já está vinculada a outro projeto. Escolha outra pasta ou remova o vínculo existente abaixo.'
-                  )}
-                </p>
-              ) : null}
               <div className="space-y-2">
-                <Button disabled={!ready || !!busy} onClick={() => void act('save', save)}>
-                  {busy === 'save' ? (
-                    <Loader2 size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                  ) : (
-                    <Link2 size={14} aria-hidden="true" />
-                  )}
-                  {L(
-                    matchesSaved ? 'Project linked' : existing && !occupied ? 'Update link' : 'Link project',
-                    matchesSaved
-                      ? 'Projeto vinculado'
-                      : existing && !occupied
-                        ? 'Atualizar vínculo'
-                        : 'Vincular projeto'
-                  )}
-                </Button>
-                {linked.length ? (
-                  <Button
-                    variant="ghost"
-                    disabled={!!busy}
-                    onClick={() => {
-                      setEditing(false)
-                      setError('')
-                      setFolderError('')
-                      setNotice('')
-                    }}
-                  >
-                    {L('Cancel', 'Cancelar')}
-                  </Button>
-                ) : null}
-                {!workspace && !loading ? (
-                  <p className="text-xs text-muted-foreground">
-                    {L(
-                      'Select a project and a local folder to link them.',
-                      'Escolha um projeto e uma pasta local para criar o vínculo.'
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button disabled={!!busy} onClick={submit}>
+                    {busy === 'save' ? (
+                      <Loader2 size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                    ) : (
+                      <Link2 size={14} aria-hidden="true" />
                     )}
-                  </p>
-                ) : null}
+                    {L(
+                      existing && !occupied ? 'Update link' : 'Link project',
+                      existing && !occupied ? 'Atualizar vínculo' : 'Vincular projeto'
+                    )}
+                  </Button>
+                  {linked.length ? (
+                    <Button variant="ghost" disabled={!!busy} onClick={stopEditing}>
+                      {L('Cancel', 'Cancelar')}
+                    </Button>
+                  ) : null}
+                </div>
                 {error ? (
                   <p role="alert" className="text-xs text-destructive">
                     {error}
                   </p>
-                ) : null}
+                ) : blocker && blocker !== 'occupied' ? (
+                  <p className="text-xs text-muted-foreground" data-testid="link-blocker">
+                    {L('Missing: ', 'Falta: ')}
+                    {blockerText[blocker].replace(/^./, (c) => c.toLowerCase())}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {L(
+                      'Ready. Linking only saves this pairing; nothing runs yet.',
+                      'Tudo pronto. Vincular só salva essa relação; nada roda ainda.'
+                    )}
+                  </p>
+                )}
               </div>
             </>
           ) : null}

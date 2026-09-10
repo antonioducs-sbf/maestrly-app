@@ -43,7 +43,9 @@
   .board-column > header > div > span { font: 500 11px var(--font-mono); padding: 2px 7px; border-radius: 999px; background: var(--surface-raised); color: var(--muted); }
   .board-column[data-automated="true"] > header > div > svg { color: var(--brass); }
   .board-column[data-cue="live"] > header > div > svg { color: var(--cue); }
-  .agent-working { font: 500 10px var(--font-mono); font-style: normal; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cue); white-space: nowrap; }
+  /* Text stays readable (ink); the cue hue lives only in the dot and the rail. */
+  .agent-working { display: inline-flex; align-items: center; gap: 5px; font: 500 10px var(--font-mono); font-style: normal; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink); white-space: nowrap; }
+  .agent-working::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--cue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cue) 25%, transparent); }
   .board-column > header .icon-button { width: 28px; height: 28px; border-color: transparent; }
   .board-column > header > svg { flex-shrink: 0; }
   .column-controls { display: flex; align-items: center; justify-content: flex-end; gap: 2px; margin: 0 0 8px; }

@@ -47,7 +47,7 @@
   .project-scope-note { margin: 8px 0 0; color: var(--rail-muted); font-size: 10px; line-height: 1.5; }
   .project-caption-short { display: none; }
 
-  .nav-caption { margin: 18px 12px 6px; font: 600 10px/1 var(--font-mono); letter-spacing: 0.14em; text-transform: uppercase; color: #6f746d; }
+  .nav-caption { margin: 18px 12px 6px; font: 600 10px/1 var(--font-mono); letter-spacing: 0.14em; text-transform: uppercase; color: #868b83; }
   .rail nav { display: grid; gap: 2px; }
   .rail nav button {
     display: flex;

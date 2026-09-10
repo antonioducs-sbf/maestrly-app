@@ -20,9 +20,9 @@ A control board where work moves between columns and an agent starts working the
 | `--surface` | `#eeede8` | `#1b1e1c` | columns, inputs, chips |
 | `--surface-raised` | `#ffffff` | `#222524` | cards, panels, dialogs |
 | `--ink` | `#1f201e` | `#ece9e1` | text |
-| `--muted` | `#6f7169` | `#9ea298` | secondary text |
+| `--muted` | `#656760` | `#9ea298` | secondary text |
 | `--line` / `--line-strong` | `#e3e2da` / `#c9c8be` | `#2f3330` / `#474c48` | hairlines |
-| `--brass` / `--brass-soft` | `#9a7a37` / `#f0e7d2` | `#d4b273` / `#33301f` | brand accent, selected states |
+| `--brass` / `--brass-soft` | `#7d6229` / `#f0e7d2` | `#d4b273` / `#33301f` | brand accent, selected states |
 | `--cue` | `#e0a83a` | `#f2bd52` | **only** agent activity (running now) |
 | `--moss` | `#2b7a58` | `#63d19c` | success / online |
 | `--brick` | `#b34a4d` | `#ff8288` | danger / blocked |
@@ -68,6 +68,8 @@ All disabled under `prefers-reduced-motion`. Columns stagger in (40ms apart, 260
 Lucide (already bundled), chosen on purpose: column roles `Inbox` (backlog) / `CheckCheck` (done) / `Bot` (automated) / `CircleDashed` (manual); priority glyphs `ChevronsUp` high, `Equal` medium, `ChevronDown` low (with text label for a11y); card actions `ArrowUp`/`ArrowDown`/`MonitorPlay`; nav as before plus group captions. Empty states use one inline SVG illustration built from the brand arcs (`EmptyState` component), tinted by CSS variables so it follows the theme. One generated raster image only: an abstract brass-arcs atmosphere for the login screen backdrop.
 
 ## Constraints
+
+- Text contrast ≥ 4.5:1 for `--muted` on `--canvas`/`--surface`/`--surface-raised` and `--brass` on `--brass-soft`/`--surface-raised` in both themes (light `--muted`/`--brass` were darkened from the first draft to meet this). The `--cue` hue is never used for text.
 
 - Every class hook and accessible name used by `apps/web/e2e/*.spec.ts` is preserved.
 - All copy goes through `t()` with `en` and `ptBR` entries.

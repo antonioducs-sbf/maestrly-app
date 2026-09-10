@@ -488,7 +488,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
           {projectId && view === 'devices' ? <PersonalDevicesPanel key={organizationId+projectId} organizationId={organizationId} projectId={projectId}/> : null}
           {projectId && view === 'team' ? <TeamPanel key={organizationId+projectId} organizationId={organizationId} projectId={projectId} projectName={activeProject?.name??''}/> : null}
           {projectId && view === 'runners' ? (
-            <RunnersPanel organizationId={organizationId} projectId={projectId} canManage={canManage} />
+            <RunnersPanel key={organizationId+projectId} organizationId={organizationId} projectId={projectId} canManage={canManage} />
           ) : null}
           {projectId && view === 'executions' ? (
             <OperationsPanel organizationId={organizationId} projectId={projectId} />

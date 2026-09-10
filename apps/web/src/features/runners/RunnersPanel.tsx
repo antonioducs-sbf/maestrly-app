@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Cpu, Radio } from 'lucide-react'
+import { Cpu, Radio, Trash2 } from 'lucide-react'
 import type { RepositoryBinding } from '@maestrly/protocol'
 import { api, write } from '../../app/api.js'
 import { t, useLocale, errorText, dateTime } from '../../i18n/index.js'
+import { FormDialog } from '../../components/FormDialog.js'
 interface RunnerView {
   id: string
   name: string
@@ -23,6 +24,8 @@ export function RunnersPanel({
   useLocale()
   const [runners, setRunners] = useState<RunnerView[]>([]),
     [repos, setRepos] = useState<RepositoryBinding[]>([])
+  const [removing, setRemoving] = useState<RunnerView | null>(null)
+  const [revision, setRevision] = useState(0)
   const [enrollment, setEnrollment] = useState<{ token: string; expiresAt: string } | null>(null),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
@@ -38,7 +41,7 @@ export function RunnersPanel({
           api<{ canonicalUrl: string }>('/api/v1/meta'),
         ])
         if (alive) {
-          setRunners(runners)
+          setRunners(runners.filter((runner) => runner.status !== 'revoked'))
           setRepos(repos)
           setServerUrl(meta.canonicalUrl)
           setError('')
@@ -53,7 +56,7 @@ export function RunnersPanel({
       alive = false
       clearInterval(timer)
     }
-  }, [base])
+  }, [base, revision])
   return (
     <section className="table-panel">
       <header>
@@ -104,7 +107,7 @@ export function RunnersPanel({
           <p>{t('Enroll a runner to execute work in an approved local repository.')}</p>
         </div>
       ) : (
-        <div className="data-list">
+        <div className="data-list runner-list">
           {runners.map((runner) => (
             <article key={runner.id}>
               <i className={'presence ' + runner.status} />
@@ -122,10 +125,32 @@ export function RunnersPanel({
                     </span>
                   ))}
               </div>
+              {canManage ? (
+                <button className="quiet danger" onClick={() => setRemoving(runner)}>
+                  <Trash2 size={16} aria-hidden="true" />
+                  {t('Remove runner')}
+                </button>
+              ) : null}
             </article>
           ))}
         </div>
       )}
+      {removing && canManage ? (
+        <FormDialog
+          title={t('Remove runner')}
+          submitLabel={t('Remove runner')}
+          onClose={() => setRemoving(null)}
+          onSubmit={async () => {
+            await write(base + '/runners/' + removing.id + '/revoke', 'POST', {})
+            setRunners((current) => current.filter((runner) => runner.id !== removing.id))
+            setRevision((current) => current + 1)
+          }}
+        >
+          <p><strong>{removing.name}</strong></p>
+          <p>{t('This revokes the runner’s access to all its projects and requests cancellation of its running work.')}</p>
+          <p>{t('Execution history is kept. To use this runner again, enroll it again.')}</p>
+        </FormDialog>
+      ) : null}
       {repos
         .filter((repo) => !repo.disabledAt)
         .map((repo) => {

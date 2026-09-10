@@ -25,7 +25,9 @@
     display: flex;
     flex-direction: column;
     z-index: 5;
+    border-right: 1px solid transparent;
   }
+  :root[data-theme="dark"] .rail { border-right-color: var(--line); }
   .rail button { border: 0; background: transparent; color: var(--rail-muted); overflow-wrap: anywhere; }
   .rail button:focus-visible { outline-color: var(--rail-brass); }
   .rail .sidebar-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; margin-bottom: 20px; flex-shrink: 0; }

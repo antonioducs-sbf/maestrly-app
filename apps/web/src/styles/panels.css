@@ -136,12 +136,11 @@
   .personal-offline { padding: 12px; border-radius: var(--radius-s); background: var(--brass-soft); font-size: 13px; line-height: 1.6; }
 
   /* ---- Entry screens (login, device approval, boot) ---------------------- */
-  .language-selector { position: relative; z-index: 6; display: flex; justify-content: flex-end; margin: 0; padding: 8px 24px; background: var(--canvas); border-bottom: 1px solid var(--line); }
   .login-shell, .device-shell, .boot-screen { min-height: calc(100vh - 49px); }
   .boot-screen { display: grid; place-content: center; justify-items: center; gap: 30px; color: var(--muted); }
   .brand-symbol { display: block; width: 68px; height: 68px; padding: 10px; border-radius: var(--radius-l); background: var(--rail); object-fit: contain; }
   .brand-symbol.small { width: 44px; height: 44px; padding: 5px; margin: 18px auto 30px; }
-  .login-atmosphere { position: fixed; inset: 0; z-index: -1; background: url(/brand/login-atmosphere.jpg) center / cover no-repeat; opacity: 0.16; pointer-events: none; }
+  .login-atmosphere { position: fixed; inset: 0; z-index: -1; background: url(/brand/login-atmosphere.jpg) center / cover no-repeat; opacity: 0.1; pointer-events: none; }
   :root[data-theme="dark"] .login-atmosphere { opacity: 0.4; }
   .login-shell { position: relative; isolation: isolate; display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 400px); justify-content: center; align-content: center; align-items: center; gap: 72px; padding: 48px 32px; }
   .login-mark { max-width: 420px; }
@@ -167,7 +166,6 @@
     .automation-column-list article > button { margin-left: 32px; }
     .automation-toggle-row { display: block; }
     .prompt-preview-controls { flex-wrap: wrap; }
-    .language-selector { padding: 8px 16px; }
     .login-shell { grid-template-columns: minmax(0, 420px); gap: 24px; padding: 28px 20px; }
     .login-mark h1 { font-size: 28px; margin: 16px 0 10px; }
     .login-mark .brand-symbol { width: 52px; height: 52px; }

@@ -223,10 +223,10 @@ export function BoardView({
                 <RoleIcon size={14} aria-hidden="true" />
                 <h2>{column.name}</h2>
                 <span>{number(cardsByColumn.get(column.id)?.length ?? 0)}</span>
-                {cueState === 'live' ? <em className="agent-working">{t('Agent working')}</em> : null}
               </div>
               {role==='backlog'||role==='done'?<LockKeyhole size={15} aria-label={t('Fixed column')}/>:canManageAutomation?<button className="icon-button" aria-label={t('Configure automation')+' '+column.name} onClick={()=>setEditingAutomation(column.id)}><Settings2 size={15}/></button>:automated?<Bot size={15} aria-label={t('Agent automation configured')}/>:null}
             </header>
+            {cueState === 'live' ? <p className="agent-working" role="status">{t('Agent working')}</p> : null}
             {!readOnly && (column.role??'normal')==='normal' ? (
               <ColumnControls
                 column={column}
@@ -282,6 +282,7 @@ export function BoardView({
                         </span>
                       ) : null}
                     </div>
+                    <div className="card-foot">
                     <div className="card-tags">
                       {card.automationBlocked?<span className="dispatch-blocked">{t('Dispatch blocked')}</span>:null}
                       {card.labels.map((label) => (
@@ -330,6 +331,7 @@ export function BoardView({
                           <MonitorPlay size={14} />
                         </button>
                       ) : null}
+                    </div>
                     </div>
                   </article>
                 )

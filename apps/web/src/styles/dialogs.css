@@ -87,73 +87,6 @@
   .markdown-content th, .markdown-content td { padding: 8px; border: 1px solid var(--line); }
   .markdown-content input[type="checkbox"] { width: 16px; }
   .markdown-content blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--brass); color: var(--muted); }
-  .rich-markdown { min-height: 180px; }
-  .rich-markdown .milkdown {
-    --crepe-color-background: var(--surface-raised);
-    --crepe-color-on-background: var(--ink);
-    --crepe-color-surface: var(--surface);
-    --crepe-color-surface-low: var(--surface);
-    --crepe-color-on-surface: var(--ink);
-    --crepe-color-on-surface-variant: var(--muted);
-    --crepe-color-outline: var(--line);
-    --crepe-color-primary: var(--brass);
-    --crepe-color-secondary: var(--brass-soft);
-    --crepe-color-on-secondary: var(--ink);
-    --crepe-color-hover: var(--brass-soft);
-    --crepe-color-selected: var(--brass-soft);
-    --crepe-font-title: var(--font-display);
-    --crepe-font-default: var(--font-body);
-    --crepe-font-code: var(--font-mono);
-  }
-  .rich-markdown .milkdown .ProseMirror { padding: 20px 28px; min-height: 180px; font-size: 14px; }
-  .rich-markdown .milkdown .ProseMirror h1 { font-size: 24px; }
-  .rich-markdown .milkdown .ProseMirror h2 { font-size: 20px; }
-
-  /* ---- Select ------------------------------------------------------------ */
-  .select-trigger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    width: 100%;
-    min-width: 0;
-    min-height: 38px;
-    padding: 8px 11px;
-    background: var(--surface-raised);
-    color: var(--ink);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-s);
-    text-align: left;
-    font-size: 13px;
-    font-weight: 500;
-    transition: border-color var(--dur-fast), box-shadow var(--dur-fast), background var(--dur-fast);
-  }
-  .select-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .select-trigger > svg { flex-shrink: 0; color: var(--muted); }
-  .select-trigger:not(:disabled):hover { border-color: var(--line-strong); background: var(--surface); }
-  .select-trigger[aria-expanded="true"] { border-color: var(--brass); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brass) 18%, transparent); }
-  .select-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
-  .select-menu {
-    position: fixed;
-    inset: auto;
-    margin: 0;
-    padding: 5px;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-m);
-    background: var(--surface-raised);
-    color: var(--ink);
-    box-shadow: var(--shadow-pop);
-    overflow: auto;
-    overscroll-behavior: contain;
-    animation: dialog-in var(--dur-fast) var(--ease-out);
-  }
-  .select-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 10px; border-radius: var(--radius-s); font-size: 13px; cursor: pointer; }
-  .select-option > span { overflow-wrap: anywhere; }
-  .select-option.highlighted { background: var(--brass-soft); }
-  .select-option[aria-selected="true"] { font-weight: 600; }
-  .select-option > svg { flex-shrink: 0; color: var(--brass); }
-  .language-selector .select-trigger { width: auto; min-width: 175px; min-height: 32px; font-size: 12px; }
-  .project-switcher .select-trigger { max-width: 300px; }
 
   @media (max-width: 760px) {
     .form-dialog { padding: 20px; }
@@ -165,8 +98,33 @@
     .field-grid { grid-template-columns: 1fr; gap: 0; }
     .card-context { gap: 5px; }
     .status-pair { flex-direction: column; }
-    .select-option { min-height: 44px; }
-    .project-switcher .select-trigger { max-width: 210px; }
     .rich-markdown .milkdown .ProseMirror { padding: 14px; }
   }
 }
+
+/* Milkdown/Crepe ships unlayered CSS, which beats every layered rule; these overrides must stay unlayered too. */
+.rich-markdown { min-height: 180px; }
+.rich-markdown .milkdown {
+  --crepe-color-background: var(--surface-raised);
+  --crepe-color-on-background: var(--ink);
+  --crepe-color-surface: var(--surface);
+  --crepe-color-surface-low: var(--surface);
+  --crepe-color-on-surface: var(--ink);
+  --crepe-color-on-surface-variant: var(--muted);
+  --crepe-color-outline: var(--line);
+  --crepe-color-primary: var(--brass);
+  --crepe-color-secondary: var(--brass-soft);
+  --crepe-color-on-secondary: var(--ink);
+  --crepe-color-hover: var(--brass-soft);
+  --crepe-color-selected: var(--brass-soft);
+  --crepe-font-title: var(--font-display);
+  --crepe-font-default: var(--font-body);
+  --crepe-font-code: var(--font-mono);
+}
+.rich-markdown .milkdown .ProseMirror { padding: 18px 22px; min-height: 180px; font-size: 14px; font-family: var(--font-body); line-height: 1.6; }
+.rich-markdown .milkdown .ProseMirror :is(h1, h2, h3, h4) { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.02em; margin: 14px 0 6px; }
+.rich-markdown .milkdown .ProseMirror h1 { font-size: 24px; }
+.rich-markdown .milkdown .ProseMirror h2 { font-size: 20px; }
+.rich-markdown .milkdown .ProseMirror h3 { font-size: 16px; }
+.rich-markdown .milkdown .ProseMirror > :first-child { margin-top: 0; }
+.rich-markdown .milkdown .ProseMirror code { font-family: var(--font-mono); }

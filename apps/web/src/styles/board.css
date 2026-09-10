@@ -25,7 +25,7 @@
   .archived-boards p { margin: 0; color: var(--muted); }
 
   /* ---- Columns ----------------------------------------------------------- */
-  .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr); gap: 16px; align-items: start; overflow-x: auto; padding-bottom: 24px; }
+  .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 360px); gap: 16px; align-items: start; overflow-x: auto; padding-bottom: 24px; }
   .board-column {
     position: relative;
     min-height: 380px;
@@ -39,12 +39,12 @@
   .board-column > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 4px 6px 10px; color: var(--muted); }
   .board-column > header > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .board-column > header > div > svg { flex-shrink: 0; }
-  .board-column h2 { font-size: 13px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+  .board-column h2 { font-size: 13px; font-weight: 600; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .board-column > header > div > span { font: 500 11px var(--font-mono); padding: 2px 7px; border-radius: 999px; background: var(--surface-raised); color: var(--muted); }
   .board-column[data-automated="true"] > header > div > svg { color: var(--brass); }
   .board-column[data-cue="live"] > header > div > svg { color: var(--cue); }
   /* Text stays readable (ink); the cue hue lives only in the dot and the rail. */
-  .agent-working { display: inline-flex; align-items: center; gap: 5px; font: 500 10px var(--font-mono); font-style: normal; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink); white-space: nowrap; }
+  .agent-working { display: flex; align-items: center; gap: 7px; margin: -4px 6px 10px; font: 500 10px var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink); white-space: nowrap; }
   .agent-working::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--cue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cue) 25%, transparent); }
   .board-column > header .icon-button { width: 28px; height: 28px; border-color: transparent; }
   .board-column > header > svg { flex-shrink: 0; }
@@ -84,11 +84,12 @@
   .priority-urgent, .priority-high { color: var(--brick); }
   .priority-medium { color: var(--brass); }
   .priority-low, .priority-none { color: var(--muted); }
-  .card-tags { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 14px 10px; }
+  .card-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; padding: 0 8px 8px 14px; min-height: 36px; }
+  .card-tags { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; min-width: 0; padding-bottom: 2px; }
   .card-tags:empty { display: none; }
   .card-tags span { font-size: 10px; font-weight: 600; padding: 3px 7px; border-radius: 4px; background: var(--brass-soft); color: var(--brass); overflow-wrap: anywhere; }
   .card-tags .dispatch-blocked, .card-context .dispatch-blocked { color: var(--brick); background: color-mix(in srgb, var(--brick) 12%, transparent); }
-  .card-actions { display: flex; justify-content: flex-end; gap: 3px; padding: 0 8px 8px; opacity: 0; transition: opacity var(--dur-fast); }
+  .card-actions { display: flex; justify-content: flex-end; gap: 2px; margin-left: auto; opacity: 0; transition: opacity var(--dur-fast); }
   .work-card:hover .card-actions, .work-card:focus-within .card-actions { opacity: 1; }
   .card-actions .icon-button, .card-actions .select-compact { width: 28px; height: 28px; min-height: 28px; padding: 0; border-color: transparent; justify-content: center; }
   .card-actions .select-compact { background: transparent; color: var(--muted); }

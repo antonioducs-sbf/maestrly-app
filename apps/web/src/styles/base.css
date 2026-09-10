@@ -81,4 +81,58 @@
   ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border: 2px solid transparent; background-clip: padding-box; border-radius: 999px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
   @media (forced-colors: active) { * { scrollbar-color: auto; } }
+
+  /* ---- Select ------------------------------------------------------------ */
+  .select-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 11px;
+    background: var(--surface-raised);
+    color: var(--ink);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-s);
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+    transition: border-color var(--dur-fast), box-shadow var(--dur-fast), background var(--dur-fast);
+  }
+  .select-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .select-trigger > svg { flex-shrink: 0; color: var(--muted); }
+  .select-trigger:not(:disabled):hover { border-color: var(--line-strong); background: var(--surface); }
+  .select-trigger[aria-expanded="true"] { border-color: var(--brass); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brass) 18%, transparent); }
+  .select-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+  .select-menu {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    padding: 5px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-m);
+    background: var(--surface-raised);
+    color: var(--ink);
+    box-shadow: var(--shadow-pop);
+    overflow: auto;
+    overscroll-behavior: contain;
+    animation: dialog-in var(--dur-fast) var(--ease-out);
+  }
+  .select-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 10px; border-radius: var(--radius-s); font-size: 13px; cursor: pointer; }
+  .select-option > span { overflow-wrap: anywhere; }
+  .select-option.highlighted { background: var(--brass-soft); }
+  .select-option[aria-selected="true"] { font-weight: 600; }
+  .select-option > svg { flex-shrink: 0; color: var(--brass); }
+  /* Entry screens (login, invitation, device approval) show the language bar on top; the rail restyles it. */
+  .language-selector { position: relative; z-index: 6; display: flex; justify-content: flex-end; margin: 0; padding: 8px 24px; background: var(--canvas); border-bottom: 1px solid var(--line); }
+  .language-selector .select-trigger { width: auto; min-width: 175px; min-height: 32px; font-size: 12px; }
+  .project-switcher .select-trigger { max-width: 300px; }
+
+  @media (max-width: 760px) {
+    .select-option { min-height: 44px; }
+    .project-switcher .select-trigger { max-width: 210px; }
+    .language-selector { padding: 8px 16px; }
+  }
 }

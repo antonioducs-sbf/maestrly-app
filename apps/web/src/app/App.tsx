@@ -262,7 +262,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
         cursor = Number(event.lastEventId) || cursor
         try {
           const type = JSON.parse(event.data).type
-          refreshTeam ||= type.startsWith('team.')
+          refreshTeam ||= type.startsWith('team.') || type.startsWith('project.')
           refreshBoards ||= type.startsWith('board.') || type.startsWith('column.')
         } catch {}
         if (refresh) return
@@ -294,6 +294,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
 
   const [accountOpen,setAccountOpen]=useState(false),[passwordChanged,setPasswordChanged]=useState(false)
   const [creatingProject, setCreatingProject] = useState(false)
+  const [renamingProject, setRenamingProject] = useState<Project | null>(null)
   async function createProject(data: FormData) {
     const name = String(data.get('name') ?? '').trim()
     const description = String(data.get('description') ?? '').trim()
@@ -320,6 +321,22 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
   return (
     <div className={'workspace-shell '+(collapsed?'sidebar-collapsed':'sidebar-expanded')+(smallScreen&&mobileOpen?' sidebar-mobile-open':'')+(chatOpen?' chat-open':'')}>
       {accountOpen?<AccountDialog user={session.user} onClose={()=>setAccountOpen(false)} onChanged={()=>setPasswordChanged(true)}/>:null}
+      {renamingProject ? <FormDialog
+        title={t('Rename project')}
+        submitLabel={t('Save changes')}
+        onClose={() => setRenamingProject(null)}
+        onSubmit={async (data) => {
+          const name = String(data.get('name') ?? '').trim()
+          if (!name) throw new Error('Enter a project name.')
+          const updated = await write<Project>(
+            `/api/v1/organizations/${renamingProject.organizationId}/projects/${renamingProject.id}`,
+            'PATCH', { name }
+          )
+          setProjects(current => current.map(project => project.id === updated.id ? { ...project, ...updated } : project))
+        }}
+      >
+        <label>{t('Project name')}<input name="name" required maxLength={160} defaultValue={renamingProject.name} /></label>
+      </FormDialog> : null}
       {creatingProject ? (
         <FormDialog
           title={t('Create project')}
@@ -360,6 +377,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut(): 
               selectedId={projectId}
               onSelect={selectProject}
               onCreate={() => setCreatingProject(true)}
+              onRename={activeProject && !readOnly ? () => setRenamingProject(activeProject) : undefined}
             />
           ) : null}
           <p className="project-scope-note" id="project-scope-note">{t('Navigation below belongs to this project.')}</p>

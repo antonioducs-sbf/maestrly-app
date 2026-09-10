@@ -91,7 +91,7 @@ try {
   await call('POST', '/api/auth/sign-in/email', { email, password: userPassword })
   const [org] = await call('GET', '/api/v1/organizations')
   const O = `/api/v1/organizations/${org.id}`
-  const { project, boardId } = await call('POST', `${O}/projects`, { name: 'Launch control', description: 'Website relaunch: content, build, review and release.' })
+  const { boardId } = await call('POST', `${O}/projects`, { name: 'Launch control', description: 'Website relaunch: content, build, review and release.' })
   const board = await call('GET', `${O}/boards/${boardId}`)
   const columnsByName = () => call('GET', `${O}/boards/${boardId}`).then((s) => new Map(s.columns.map((c) => [c.name, c])))
   let cols = await columnsByName()

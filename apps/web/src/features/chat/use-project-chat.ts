@@ -7,6 +7,8 @@ import type {
   ProjectChatSnapshot,
   ProjectChatMessage,
   ChatDecision,
+  ChatUpdate,
+  ProjectChatSettings,
 } from '@maestrly/protocol'
 import { serverUrl } from '../../app/api.js'
 
@@ -54,6 +56,13 @@ export function useProjectChat(organizationId: string, projectId: string, userId
       setNextCursor(result.nextCursor)
     }
   }, [client])
+  const acceptSession = useCallback((session: ProjectChatSession) => {
+    setSessions((items) => items.map((item) => (item.id === session.id ? session : item)))
+    if (current.current?.session.id === session.id) {
+      current.current = { ...current.current, session }
+      setData(current.current)
+    }
+  }, [])
   useEffect(() => {
     let active = true
     void Promise.allSettled([client.destinations(), client.sessions()]).then(([d, s]) => {
@@ -153,27 +162,48 @@ export function useProjectChat(organizationId: string, projectId: string, userId
       }),
     cancel: () =>
       act(async () => {
-        if (data?.turn) await client.cancel(sessionId, data.turn.id)
+        if (data?.turn) {
+          await client.cancel(sessionId, data.turn.id)
+          if (mounted.current && selected.current === sessionId) setRefresh((value) => value + 1)
+        }
       }),
     decide: (id: string, version: number, decision: ChatDecision) =>
       act(() => client.decide(sessionId, id, version, decision, 'decision-' + id + '-' + version)),
+    updateSettings: (settings: ProjectChatSettings) =>
+      act(async () => {
+        const snapshot = current.current
+        if (!snapshot) throw new Error('Conversation settings are still loading.')
+        const body: ChatUpdate = { ...settings, expectedVersion: snapshot.session.version }
+        try {
+          const updated = await client.update(snapshot.session.id, body, crypto.randomUUID())
+          if (mounted.current && selected.current === updated.id) acceptSession(updated)
+          return updated
+        } catch (caught) {
+          if ((caught as { status?: number }).status === 409 && mounted.current) {
+            const fresh = await client.snapshot(snapshot.session.id)
+            if (selected.current === fresh.session.id) {
+              current.current = fresh
+              setData(fresh)
+              setSessions((items) => items.map((item) => (item.id === fresh.session.id ? fresh.session : item)))
+            }
+          }
+          throw caught
+        }
+      }),
     rename: (title: string) =>
       act(async () => {
         if (!data) return
-        await transport.request('PATCH', client.path + '/sessions/' + sessionId, {
-          body: { title, expectedVersion: data.session.version },
-          idempotencyKey: crypto.randomUUID(),
-        })
-        await reloadList()
-        setRefresh((v) => v + 1)
+        const updated = await client.update(
+          sessionId,
+          { title, expectedVersion: data.session.version },
+          crypto.randomUUID()
+        )
+        acceptSession(updated)
       }),
     archive: () =>
       act(async () => {
         if (!data) return
-        await transport.request('PATCH', client.path + '/sessions/' + sessionId, {
-          body: { archived: true, expectedVersion: data.session.version },
-          idempotencyKey: crypto.randomUUID(),
-        })
+        await client.update(sessionId, { archived: true, expectedVersion: data.session.version }, crypto.randomUUID())
         await reloadList()
         setSessionId('')
       }),

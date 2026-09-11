@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { ArrowUp, Square } from 'lucide-react'
 import { t } from '../../i18n/index.js'
 export function ChatComposer({
@@ -6,6 +6,7 @@ export function ChatComposer({
   disabled,
   active,
   busy,
+  toolbar,
   onSend,
   onStop,
 }: {
@@ -13,6 +14,8 @@ export function ChatComposer({
   disabled: boolean
   active: boolean
   busy: boolean
+  /** Inline controls rendered at the left of the send button (mode, effort, model). */
+  toolbar?: ReactNode
   onSend(text: string, id: string): Promise<void>
   onStop(): void
 }) {
@@ -69,7 +72,7 @@ export function ChatComposer({
         }}
       />
       <div>
-        <small>{t('Enter to send · Shift+Enter for a new line')}</small>
+        {toolbar ?? <small>{t('Enter to send · Shift+Enter for a new line')}</small>}
         {active ? (
           <button type="button" className="quiet" disabled={busy} onClick={onStop}>
             <Square size={13} />

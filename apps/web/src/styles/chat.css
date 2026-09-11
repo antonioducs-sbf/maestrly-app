@@ -19,6 +19,7 @@
   .chat-welcome h3 { font-size:24px; line-height:1.2; }
   .chat-welcome p { font-size:13px; line-height:1.65; color:var(--muted); max-width:38ch; }
   .chat-setup-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; }
+  .chat-setup-grid.single { grid-template-columns:minmax(0,1fr); }
   .project-chat-setup label { min-width:0; }
   .chat-unavailable { padding:14px; border:1px solid var(--line); border-radius:var(--radius-m); font-size:13px; color:var(--muted); }
   .chat-integrations { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 20px; font-size:10px; color:var(--muted); }
@@ -50,6 +51,38 @@
   .project-chat-composer>div { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
   .project-chat-composer small { color:var(--muted); font-size:10px; }
   .project-chat-composer .primary { min-height:32px; padding:0 8px; }
+  /* Inline toolbar (desktop-composer style): quiet pills, no boxes. */
+  .chat-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:2px; min-width:0; flex:1; }
+  .chat-pill-group { display:inline-flex; align-items:center; gap:2px; min-width:0; color:var(--muted); }
+  .chat-pill-group>svg { flex-shrink:0; margin-left:6px; }
+  .chat-toolbar .select-trigger,.chat-pill { display:inline-flex; align-items:center; gap:5px; width:auto; min-width:0; height:28px; min-height:28px; padding:0 7px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--muted); font-size:12px; font-weight:500; }
+  .chat-toolbar .select-trigger>svg,.chat-pill>svg { width:12px; height:12px; }
+  .chat-toolbar .select-trigger:not(:disabled):hover,.chat-pill:not(:disabled):hover { background:var(--surface); color:var(--ink); border-color:transparent; }
+  .chat-toolbar .select-trigger[aria-expanded=true] { background:var(--surface); color:var(--ink); box-shadow:none; border-color:transparent; }
+  .chat-toolbar .select-trigger:disabled,.chat-pill:disabled { opacity:0.55; }
+  .chat-model-trigger { max-width:100%; color:var(--ink); }
+  .chat-model-trigger>span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-fast-toggle[aria-pressed=true] { color:var(--brass); background:var(--brass-soft); }
+  .chat-settings { display:grid; gap:4px; margin:14px 0 4px; padding:8px 6px; border:1px solid var(--line); border-radius:10px; background:var(--surface-raised); }
+  .chat-permission-bar { display:flex; align-items:center; flex-wrap:wrap; gap:2px 10px; margin:-8px 16px 14px; padding:0 6px; min-height:24px; flex-shrink:0; }
+  .chat-settings .chat-permission-bar { margin:0; padding:0; }
+  .chat-permission-control { display:inline-flex; align-items:center; gap:0; color:var(--muted); }
+  .chat-permission-control>svg { flex-shrink:0; }
+  .chat-permission-control .select-trigger { width:auto; min-width:0; height:24px; min-height:24px; padding:0 4px; border:0; background:transparent; color:var(--muted); font-size:11px; font-weight:500; }
+  .chat-permission-control .select-trigger>svg { width:12px; height:12px; }
+  .chat-permission-control .select-trigger:not(:disabled):hover,.chat-permission-control .select-trigger[aria-expanded=true] { background:transparent; color:var(--ink); box-shadow:none; }
+  .full-access .chat-permission-control,.full-access .chat-permission-control .select-trigger { color:var(--brass); }
+  .chat-permission-hints { display:flex; flex-wrap:wrap; gap:2px 8px; margin-left:auto; color:var(--muted); font-size:10px; }
+  .chat-model-menu { position:fixed; z-index:80; margin:0; padding:6px; border:1px solid var(--line-strong); border-radius:10px; background:var(--surface-raised); color:var(--ink); box-shadow:var(--shadow-card); max-height:340px; overflow:hidden; }
+  .chat-model-search { display:flex; align-items:center; gap:7px; margin:0 0 5px; padding:0 8px; border:1px solid var(--line); border-radius:7px; background:var(--surface); }
+  .chat-model-search input { min-width:0; height:34px; padding:0; border:0; background:transparent; box-shadow:none; outline:none; font-size:12px; }
+  .chat-model-menu [role=listbox] { display:grid; gap:2px; max-height:285px; overflow:auto; }
+  .chat-model-menu [role=option] { display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; min-height:42px; padding:7px 9px; border:0; border-radius:7px; background:transparent; color:inherit; text-align:left; }
+  .chat-model-menu [role=option]:hover,.chat-model-menu [role=option][aria-selected=true] { background:var(--brass-soft); }
+  .chat-model-menu [role=option]>span { display:grid; gap:2px; min-width:0; }
+  .chat-model-menu [role=option] strong,.chat-model-menu [role=option] small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-model-menu [role=option] strong { font-size:12px; }
+  .chat-model-menu [role=option] small,.chat-model-menu p { color:var(--muted); font-size:10px; }
   .chat-stream-status { display:flex; align-items:center; gap:7px; padding:0 22px 10px; font-size:11px; color:var(--muted); }
   .chat-stream-status i { width:6px; height:6px; border-radius:50%; background:var(--muted); }
   .chat-stream-status .working { background:var(--cue); box-shadow:0 0 0 3px var(--brass-soft); }
@@ -61,5 +94,5 @@
   .project-chat-history button span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .project-chat-history button:hover,.project-chat-history [aria-current=page] { background:var(--brass-soft); color:var(--brass); }
   @media(min-width:1100px) { .workspace-shell.chat-open .workspace-main { margin-right:460px; } }
-  @media(max-width:850px) { .project-chat-drawer { width:100%; z-index:40; } .project-chat-top { padding:12px; } .project-chat-top .icon-button { width:36px; height:44px; } .project-chat-scroll { padding:18px; } .project-chat-composer .primary { min-height:44px; min-width:44px; } .project-chat-tool summary { min-height:44px; } .project-chat-context .icon-button { width:36px; height:36px; } }
+  @media(max-width:850px) { .project-chat-drawer { width:100%; z-index:40; } .project-chat-top { padding:12px; } .project-chat-top .icon-button { width:36px; height:44px; } .project-chat-scroll { padding:18px; } .project-chat-composer .primary { min-height:44px; min-width:44px; } .project-chat-tool summary { min-height:44px; } .project-chat-context .icon-button { width:36px; height:36px; } .chat-toolbar .select-trigger,.chat-pill { height:36px; min-height:36px; } .chat-permission-hints { margin-left:0; } }
 }

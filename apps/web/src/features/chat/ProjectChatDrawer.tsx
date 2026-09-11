@@ -11,7 +11,7 @@ import {
   Plus,
   X,
 } from 'lucide-react'
-import type { Card } from '@maestrly/protocol'
+import type { Card, ProjectChatSettings } from '@maestrly/protocol'
 import { api } from '../../app/api.js'
 import { t, useLocale, errorText } from '../../i18n/index.js'
 import { Select } from '../../components/Select.js'
@@ -22,6 +22,15 @@ import { ChatComposer } from './ChatComposer.js'
 import { ChatSessionList } from './ChatSessionList.js'
 import { ChatMessages } from './ChatMessages.js'
 import { ChatInteractions } from './ChatInteractions.js'
+import { ChatPermissionBar, ChatSettings, ChatSettingsToolbar } from './ChatSettings.js'
+
+const initialSettings: ProjectChatSettings = {
+  model: '',
+  mode: 'agent',
+  reasoning: null,
+  fastMode: false,
+  permMode: 'ask',
+}
 
 export function ProjectChatDrawer({
   organizationId,
@@ -47,9 +56,8 @@ export function ProjectChatDrawer({
     [renaming, setRenaming] = useState(false)
   const [runnerId, setRunnerId] = useState(''),
     [workspaceKey, setWorkspaceKey] = useState(''),
-    [model, setModel] = useState(''),
-    [branch, setBranch] = useState(''),
-    [mode, setMode] = useState('agent')
+    [branch, setBranch] = useState('')
+  const [settings, setSettings] = useState<ProjectChatSettings>(initialSettings)
   const [selectedCard, setSelectedCard] = useState<Card | null>(null),
     [newMessages, setNewMessages] = useState(false)
   const [small, setSmall] = useState(() => matchMedia('(max-width:850px)').matches)
@@ -63,9 +71,21 @@ export function ProjectChatDrawer({
     (!data ? chat.destinations[0] : undefined)
   const workspace =
     destination?.inventory.workspaces.find((w) => w.key === workspaceKey) ?? destination?.inventory.workspaces[0]
-  const selectedModel = destination?.inventory.models.find((m) => m.id === model) ?? destination?.inventory.models[0]
+  const selectedModel =
+    destination?.inventory.models.find((candidate) => candidate.id === settings.model) ??
+    destination?.inventory.models[0]
+  const draftSettings = { ...settings, model: selectedModel?.id ?? '' }
   const selectedBranch = workspace?.branches.includes(branch) ? branch : workspace?.branches[0]
   const active = !!data?.turn && ['queued', 'running', 'waiting_input', 'cancelling'].includes(data.turn.state)
+  const sessionSettings: ProjectChatSettings = data
+    ? {
+        model: data.session.model,
+        mode: data.session.mode,
+        reasoning: data.session.reasoning,
+        fastMode: data.session.fastMode,
+        permMode: data.session.permMode,
+      }
+    : initialSettings
   const pendingPlan = data?.interactions.some((i) => i.state === 'pending' && i.payload.type === 'plan') ?? false
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null
@@ -252,9 +272,8 @@ export function ProjectChatDrawer({
                     chat.create({
                       runnerId: destination.runnerId,
                       workspaceKey: workspace.key,
-                      model: selectedModel.id,
+                      ...draftSettings,
                       baseBranch: selectedBranch,
-                      mode: mode as 'chat' | 'agent',
                       title: t('New conversation'),
                       boardId: boardId ?? null,
                       cardId: cardId ?? null,
@@ -274,7 +293,7 @@ export function ProjectChatDrawer({
                     onChange={(id) => {
                       setRunnerId(id)
                       setWorkspaceKey('')
-                      setModel('')
+                      setSettings(initialSettings)
                       setBranch('')
                     }}
                   />
@@ -291,16 +310,7 @@ export function ProjectChatDrawer({
                     }}
                   />
                 </label>
-                <div className="chat-setup-grid">
-                  <label>
-                    {t('Model')}
-                    <Select
-                      label={t('Model')}
-                      value={selectedModel?.id ?? ''}
-                      options={destination.inventory.models.map((m) => ({ value: m.id, label: m.label }))}
-                      onChange={setModel}
-                    />
-                  </label>
+                <div className="chat-setup-grid single">
                   <label>
                     {t('Base branch')}
                     <Select
@@ -311,18 +321,7 @@ export function ProjectChatDrawer({
                     />
                   </label>
                 </div>
-                <label>
-                  {t('Chat mode')}
-                  <Select
-                    label={t('Chat mode')}
-                    value={mode}
-                    onChange={setMode}
-                    options={[
-                      { value: 'agent', label: t('Agent') },
-                      { value: 'chat', label: t('Read-only chat') },
-                    ]}
-                  />
-                </label>
+                <ChatSettings destination={destination} value={draftSettings} onChange={setSettings} />
                 <div className="chat-integrations">
                   {(['skills', 'mcp', 'memory'] as const).map((key) => (
                     <span key={key} className={destination.inventory.integrations[key] ? 'available' : ''}>
@@ -412,9 +411,29 @@ export function ProjectChatDrawer({
             busy={chat.busy}
             disabled={pendingPlan || !destination}
             active={active}
+            toolbar={
+              destination ? (
+                <ChatSettingsToolbar
+                  destination={destination}
+                  value={sessionSettings}
+                  disabled={active}
+                  saving={chat.busy}
+                  onChange={chat.updateSettings}
+                />
+              ) : undefined
+            }
             onSend={chat.send}
             onStop={() => perform(chat.cancel)}
           />
+          {destination ? (
+            <ChatPermissionBar
+              destination={destination}
+              value={sessionSettings}
+              disabled={active}
+              saving={chat.busy}
+              onChange={chat.updateSettings}
+            />
+          ) : null}
         </>
       ) : null}
       {renaming && data ? (

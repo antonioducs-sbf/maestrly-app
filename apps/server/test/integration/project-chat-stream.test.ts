@@ -45,7 +45,7 @@ it.skipIf(!integrationAvailable)(
       const before = await snapshot(f.pool, f.scope, f.session.id)
       await upload()
       expect((await snapshot(f.pool, f.scope, f.session.id)).cursor).toBe(before.cursor)
-      expect(before.messages.at(-1)?.parts[0]).toMatchObject({ text: 'First chunk' })
+      expect(before.messages.find((message) => message.id === id)?.parts[0]).toMatchObject({ text: 'First chunk' })
       expect(await listChatEvents(f.pool, f.scope, f.session.id, before.cursor)).toEqual([])
     } finally {
       await f.pool.end()

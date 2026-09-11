@@ -2092,11 +2092,13 @@ export async function listChatExecutionModels(
 }
 
 /**
- * Minimal catalog a cloud runner may publish. Excludes account names, base URLs, keys,
- * fingerprints, and native provider state; includes only executable pairs and supported efforts.
+ * Minimal catalog a cloud runner may publish. It includes the operator-configured provider label so an authorized
+ * user can distinguish account slots, but excludes base URLs, keys, fingerprints, and native provider state.
  */
-export async function listChatRunnerCapabilities(includeApiProviders=false): Promise<
-  Array<{ providerId: string; modelId: string; reasoningEfforts: string[]; fastMode: boolean }>
+export async function listChatRunnerCapabilities(
+  includeApiProviders = false
+): Promise<
+  Array<{ providerId: string; providerLabel: string; modelId: string; reasoningEfforts: string[]; fastMode: boolean }>
 > {
   const providers = await listChatExecutionModels({
     refreshSubscriptionAuth: true,
@@ -2104,9 +2106,15 @@ export async function listChatRunnerCapabilities(includeApiProviders=false): Pro
     subscriptionProviderTimeoutMs: 8_000,
   })
   const pairs = providers.flatMap((provider) =>
-    provider.models.map((modelId) => ({ providerId: provider.id, modelId }))
+    provider.models.map((modelId) => ({ providerId: provider.id, providerLabel: provider.name, modelId }))
   )
-  const output: Array<{ providerId: string; modelId: string; reasoningEfforts: string[]; fastMode: boolean }> = []
+  const output: Array<{
+    providerId: string
+    providerLabel: string
+    modelId: string
+    reasoningEfforts: string[]
+    fastMode: boolean
+  }> = []
   let cursor = 0
   const workers = Array.from({ length: Math.min(8, pairs.length) }, async () => {
     for (;;) {

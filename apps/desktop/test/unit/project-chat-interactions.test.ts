@@ -20,6 +20,7 @@ it('uses one-operation approvals despite local YOLO rules and retains the provid
     conversationId: conv.id,
     cwd: conv.cwd,
     mode: 'agent' as const,
+    permMode: 'ask' as const,
     providerIds: ['allowed'],
     allowCommands: true,
     allowWeb: false,
@@ -44,13 +45,52 @@ it('uses one-operation approvals despite local YOLO rules and retains the provid
     expect(() =>
       assertRemoteChatPermission({ ...policy, mode: 'chat' }, { action: 'edit', resources: ['file.ts'] })
     ).toThrow(/read-only/)
-    expect(() => assertRemoteChatPermission(policy, { action: 'read', resources: ['../other-project'] })).toThrow(
-      /outside/
-    )
+    expect(assertRemoteChatPermission(policy, { action: 'read', resources: ['../other-project'] })).toBe('ask')
     expect(withRemoteChatPolicy(policy, () => autonomousProviderAllowed('other'))).toBe(false)
   } finally {
     release()
   }
+})
+
+it('applies ask, auto, and full access without bypassing mode or operator limits', () => {
+  const base = {
+    conversationId: 'conversation',
+    cwd: '/tmp/chat',
+    mode: 'agent' as const,
+    providerIds: ['allowed'],
+    allowCommands: true,
+    allowWeb: true,
+    allowAppTools: true,
+    allowMcp: true,
+    allowPush: false,
+  }
+  expect(assertRemoteChatPermission({ ...base, permMode: 'ask' }, { action: 'edit', resources: ['file.ts'] })).toBe(
+    'ask'
+  )
+  expect(assertRemoteChatPermission({ ...base, permMode: 'auto' }, { action: 'edit', resources: ['file.ts'] })).toBe(
+    'read'
+  )
+  expect(assertRemoteChatPermission({ ...base, permMode: 'auto' }, { action: 'bash', resources: ['npm test'] })).toBe(
+    'ask'
+  )
+  expect(assertRemoteChatPermission({ ...base, permMode: 'full' }, { action: 'bash', resources: ['npm test'] })).toBe(
+    'read'
+  )
+  expect(
+    assertRemoteChatPermission(
+      { ...base, permMode: 'full' },
+      { action: 'external_directory', resources: ['/tmp/elsewhere'] }
+    )
+  ).toBe('read')
+  expect(() =>
+    assertRemoteChatPermission({ ...base, permMode: 'full', mode: 'ask' }, { action: 'edit', resources: ['file.ts'] })
+  ).toThrow(/read-only/)
+  expect(() =>
+    assertRemoteChatPermission(
+      { ...base, permMode: 'full', allowCommands: false },
+      { action: 'bash', resources: ['npm test'] }
+    )
+  ).toThrow(/commands/)
 })
 it('projects text and interactions without a renderer and excludes raw reasoning', () => {
   const sessionId = crypto.randomUUID(),
@@ -77,8 +117,12 @@ it('projects text and interactions without a renderer and excludes raw reasoning
   })
   expect(out.map((e) => e.type)).toEqual(['message', 'delta', 'interaction'])
   expect(JSON.stringify(out)).not.toContain('Private raw reasoning')
-  emitChatHost('local','chat:public-summary',{messageId:'native-id',partId:'summary',delta:'Public progress summary'})
-  expect(out.at(-1)).toMatchObject({type:'delta',kind:'reasoning',delta:'Public progress summary'})
+  emitChatHost('local', 'chat:public-summary', {
+    messageId: 'native-id',
+    partId: 'summary',
+    delta: 'Public progress summary',
+  })
+  expect(out.at(-1)).toMatchObject({ type: 'delta', kind: 'reasoning', delta: 'Public progress summary' })
   emitChatHost('local', 'chat:delta:local', {
     kind: 'text-delta',
     messageId: 'native-id',

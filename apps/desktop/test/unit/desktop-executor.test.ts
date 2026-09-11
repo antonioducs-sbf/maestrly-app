@@ -27,6 +27,7 @@ const h = vi.hoisted(() => ({
       modelId: 'gpt-fixture',
       reasoningEfforts: ['high'],
       fastMode: true,
+      providerLabel: 'Codex · Work account',
     },
     { providerId: 'other-private-account', modelId: 'other', reasoningEfforts: [], fastMode: false },
   ]),
@@ -101,6 +102,15 @@ describe('desktop chat executor', () => {
     expect(caps.models).toHaveLength(1)
     expect(caps.models[0]).toMatchObject({ provider: 'maestrly', label: 'Codex · gpt-fixture' })
     expect(JSON.stringify(caps)).not.toMatch(/personal-slot|private-account/)
+    await expect(catalog.chatModels()).resolves.toEqual([
+      {
+        id: caps.models[0]!.model,
+        label: 'gpt-fixture',
+        providerLabel: 'Codex · Work account',
+        efforts: ['high'],
+        fastMode: true,
+      },
+    ])
     const handle = await executor.start(context)
     const conversation = h.insert.mock.calls[0]![0]
     expect(conversation).toMatchObject({

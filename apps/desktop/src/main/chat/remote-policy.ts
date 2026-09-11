@@ -3,10 +3,12 @@ import path from 'node:path'
 import type { ToolSet } from 'ai'
 import { APP_TOOL_POLICY } from './tool-policy'
 import { getDb } from '../store'
+import type { ChatMode, ChatPermMode } from '../../shared/chat'
 
 export interface RemoteChatPolicy {
   conversationId: string
-  mode: 'chat' | 'agent'
+  mode: ChatMode | 'chat'
+  permMode: ChatPermMode
   cwd: string
   providerIds: string[]
   allowCommands: boolean
@@ -41,40 +43,48 @@ export function assertRemoteChatPermission(
   const deny = (why: string): never => {
     throw new Error('Remote chat operation is not allowed: ' + why)
   }
-  if (input.action === 'external_directory') deny('outside the conversation worktree')
+  const readOnly = !['agent', 'design'].includes(policy.mode)
+  const protectedEffect = () => (policy.permMode === 'ask' ? 'ask' : 'read')
+  if (input.action === 'external_directory') return policy.permMode === 'full' ? 'read' : 'ask'
   if (['read', 'edit', 'grep', 'glob'].includes(input.action)) {
+    let external = false
     for (const r of input.resources) {
       const relative = path.relative(policy.cwd, path.resolve(policy.cwd, r))
-      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative))
-        deny('outside the conversation worktree')
+      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) external = true
     }
     if (input.action === 'edit') {
-      if (policy.mode === 'chat') deny('read-only conversation')
-      return 'ask'
+      if (readOnly) deny('read-only conversation')
+      if (external && policy.permMode !== 'full') return 'ask'
+      return protectedEffect()
     }
-    if (input.resources.some((r) => /(?:^|[/\\])\.env(?:\.|$)/.test(r) && !r.endsWith('.example'))) return 'ask'
+    if (external && policy.permMode !== 'full') return 'ask'
+    if (
+      policy.permMode !== 'full' &&
+      input.resources.some((r) => /(?:^|[/\\])\.env(?:\.|$)/.test(r) && !r.endsWith('.example'))
+    )
+      return 'ask'
     return 'read'
   }
   if (input.action === 'bash') {
-    if (!policy.allowCommands || policy.mode === 'chat') deny('commands')
+    if (!policy.allowCommands || readOnly) deny('commands')
     if (!policy.allowPush && input.resources.some((r) => /\bgit\s+(?:-[^\s]+\s+)*push\b/.test(r))) deny('git push')
-    return 'ask'
+    return policy.permMode === 'full' ? 'read' : 'ask'
   }
   if (input.action === 'webfetch') {
     if (!policy.allowWeb) deny('web access')
-    return 'ask'
+    return protectedEffect()
   }
   if (input.action === 'mcp') {
     for (const name of input.resources) {
       const app = APP_TOOL_POLICY[name as keyof typeof APP_TOOL_POLICY]
       if (!(app ? policy.allowAppTools : policy.allowMcp)) deny(app ? 'application tools' : 'MCP')
-      if (policy.mode === 'chat' && !app?.readOnly) deny('read-only conversation')
+      if (readOnly && !app?.readOnly) deny('read-only conversation')
       if (!policy.allowCommands && name.startsWith('terminal_')) deny('terminal')
       if (!policy.allowWeb && name.startsWith('browser_')) deny('browser')
     }
     return input.resources.every((name) => APP_TOOL_POLICY[name as keyof typeof APP_TOOL_POLICY]?.readOnly)
       ? 'read'
-      : 'ask'
+      : protectedEffect()
   }
   return deny(input.action)
 }

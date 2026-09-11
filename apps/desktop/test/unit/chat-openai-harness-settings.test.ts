@@ -440,12 +440,14 @@ describe('OpenAI harness kill switch', () => {
     await expect(listChatRunnerCapabilities()).resolves.toEqual([
       {
         providerId: 'builtin_codex_subscription',
+        providerLabel: 'Codex',
         modelId: 'gpt-5',
         reasoningEfforts: ['high'],
         fastMode: false,
       },
       {
         providerId: secondary,
+        providerLabel: 'Codex secondary',
         modelId: 'gpt-5',
         reasoningEfforts: ['high'],
         fastMode: false,

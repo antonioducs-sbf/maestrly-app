@@ -11,6 +11,8 @@ import {
   chatConversation,
 } from '../../src/main/platform/project-chat-store'
 import { publicChatText } from '../../src/main/platform/project-chat-projection'
+import { projectChatPreferences } from '../../src/main/platform/project-chat-worker'
+import { desktopExecutorSettingsSchema } from '../../src/main/platform/executor-settings'
 beforeEach(freshDb)
 afterEach(closeDb)
 it('journals admission and unacknowledged events and reuses the native conversation identity', () => {
@@ -40,4 +42,27 @@ it('redacts structured credentials and bounds tool results', () => {
     publicChatText({ token: 'private', nested: { password: 'secret' }, text: 'Bearer abcdef0123456789' })
   ).not.toMatch(/private|secret|abcdef/)
   expect(publicChatText('x'.repeat(100), 20)).toContain('[truncated]')
+})
+
+it('maps persisted web settings to native preferences for every turn', () => {
+  const settings = desktopExecutorSettingsSchema.parse({
+    providerIds: ['provider'],
+    allowAppTools: true,
+    allowMcp: false,
+    skills: true,
+  })
+  expect(
+    projectChatPreferences({ mode: 'agent', reasoning: 'high', fastMode: true, permMode: 'full' }, settings, [
+      'private-mcp',
+    ])
+  ).toMatchObject({
+    mode: 'agent',
+    reasoning: 'high',
+    fastMode: true,
+    permMode: 'full',
+    tools: { app: true, mcpDisabled: ['private-mcp'] },
+  })
+  expect(
+    projectChatPreferences({ mode: 'chat', reasoning: null, fastMode: false, permMode: 'ask' }, settings, [])
+  ).toMatchObject({ mode: 'ask', reasoning: 'off', fastMode: false, permMode: 'ask' })
 })

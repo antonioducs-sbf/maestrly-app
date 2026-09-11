@@ -1,7 +1,7 @@
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdtemp, mkdir, writeFile, rm, readFile, access } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, readFile, access, readdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -62,7 +62,14 @@ test('real project chat: code, memory, skills, MCP, historic cards, streamed tur
     model = createServer(async (req, res) => {
       if (req.url === '/v1/models') {
         res.setHeader('content-type', 'application/json')
-        res.end(JSON.stringify({ data: [{ id: 'chat-fixture', object: 'model' }] }))
+        res.end(
+          JSON.stringify({
+            data: [
+              { id: 'chat-fixture', object: 'model' },
+              { id: 'chat-fixture-secondary', object: 'model' },
+            ],
+          })
+        )
         return
       }
       if (req.url !== '/v1/chat/completions') {
@@ -132,6 +139,22 @@ test('real project chat: code, memory, skills, MCP, historic cards, streamed tur
           return
         }
         end(res, 'Wrote the proof after your answer and permission.')
+        return
+      }
+      if (phase === 'auto') {
+        if (!did('auto-bash')) {
+          invoke('auto-bash', 'bash', { command: 'printf auto-command-proof' })
+          return
+        }
+        end(res, 'Auto mode command completed after approval.')
+        return
+      }
+      if (phase === 'full') {
+        if (!did('full-write')) {
+          invoke('full-write', 'write', { path: 'full-access-proof.txt', content: 'full-access-proof\n' })
+          return
+        }
+        end(res, 'Full access write completed without an approval prompt.')
         return
       }
       if (phase === 'plan') {
@@ -293,9 +316,14 @@ test('real project chat: code, memory, skills, MCP, historic cards, streamed tur
       await page.getByRole('textbox', { name: 'Message the project' }).fill(text)
       await page.getByRole('button', { name: 'Send message', exact: true }).click()
     }
-    await page.evaluate(()=>{
-      const arrivals:Record<string,number>={};(window as any).__chatArrivals=arrivals
-      new MutationObserver(()=>{const text=document.querySelector('.project-chat-message.assistant')?.textContent??'';for(const marker of ['Live project evidence:',...Array.from({length:5},(_,i)=>'chunk-'+i)])if(text.includes(marker)&&!arrivals[marker])arrivals[marker]=Date.now()}).observe(document.body,{childList:true,subtree:true,characterData:true})
+    await page.evaluate(() => {
+      const arrivals: Record<string, number> = {}
+      ;(window as any).__chatArrivals = arrivals
+      new MutationObserver(() => {
+        const text = document.querySelector('.project-chat-message.assistant')?.textContent ?? ''
+        for (const marker of ['Live project evidence:', ...Array.from({ length: 5 }, (_, i) => 'chunk-' + i)])
+          if (text.includes(marker) && !arrivals[marker]) arrivals[marker] = Date.now()
+      }).observe(document.body, { childList: true, subtree: true, characterData: true })
     })
     await send('Inspect the project evidence and find the completed card.')
     // The fixture MCP is a real subprocess and its use needs one explicit web permission.
@@ -305,7 +333,7 @@ test('real project chat: code, memory, skills, MCP, historic cards, streamed tur
     await expect(page.locator('.project-chat-message.assistant')).toContainText('Live project evidence:', {
       timeout: 30000,
     })
-    latencies.push(await page.evaluate(()=>(window as any).__chatArrivals['Live project evidence:']) - sentAt)
+    latencies.push((await page.evaluate(() => (window as any).__chatArrivals['Live project evidence:'])) - sentAt)
     expect(held).toBeTruthy()
     for (let i = 0; i < 5; i++) {
       sentAt = Date.now()
@@ -314,7 +342,7 @@ test('real project chat: code, memory, skills, MCP, historic cards, streamed tur
         (word) => document.querySelector('.project-chat-message.assistant')?.textContent?.includes(word),
         'chunk-' + i
       )
-      latencies.push(await page.evaluate(marker=>(window as any).__chatArrivals[marker],'chunk-'+i) - sentAt)
+      latencies.push((await page.evaluate((marker) => (window as any).__chatArrivals[marker], 'chunk-' + i)) - sentAt)
     }
     expect(used).toEqual(
       expect.arrayContaining(['read', 'memory_search', 'use_skill', 'mcp_search', 'mcp_call', 'board_search_cards'])
@@ -352,6 +380,51 @@ test('real project chat: code, memory, skills, MCP, historic cards, streamed tur
     await expect(page.locator('.project-chat-message.assistant').last()).toContainText(
       'after your answer and permission'
     )
+    await expect(page.getByRole('status').filter({ hasText: 'Ready to chat' })).toBeVisible()
+    await page.getByRole('combobox', { name: 'Model', exact: true }).click()
+    await page.getByRole('searchbox', { name: 'Search models', exact: true }).fill('secondary')
+    await page.getByRole('option', { name: /chat-fixture-secondary/ }).click()
+    await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText('secondary')
+    await page.getByRole('combobox', { name: 'Permission profile', exact: true }).click()
+    await page.getByRole('option', { name: 'Approve for me', exact: true }).click()
+    phase = 'auto'
+    await send('Run the verification command in auto mode.')
+    await expect(allow).toBeVisible()
+    await allow.click()
+    await expect(page.locator('.project-chat-message.assistant').last()).toContainText(
+      'Auto mode command completed after approval.'
+    )
+    expect(requests.at(-1).model).toBe('chat-fixture-secondary')
+    await expect(page.getByRole('status').filter({ hasText: 'Ready to chat' })).toBeVisible()
+    await page.getByRole('combobox', { name: 'Chat mode', exact: true }).click()
+    await expect(page.getByRole('option')).toHaveText(['Agent', 'Ask'])
+    await page.getByRole('option', { name: 'Agent', exact: true }).click()
+    await page.getByRole('combobox', { name: 'Permission profile', exact: true }).click()
+    await page.getByRole('option', { name: 'Full access', exact: true }).click()
+    phase = 'full'
+    await send('Write the full access proof.')
+    await expect(page.locator('.project-chat-message.assistant').last()).toContainText(
+      'Full access write completed without an approval prompt.'
+    )
+    await expect(allow).toHaveCount(0)
+    const proofPath = (await readdir(path.join(root, 'profile'), { recursive: true })).find((entry) =>
+      entry.endsWith('full-access-proof.txt')
+    )
+    expect(proofPath).toBeTruthy()
+    expect((await readFile(path.join(root, 'profile', proofPath!), 'utf8')).trim()).toBe('full-access-proof')
+    const configured = await (await request.get(server + base, { headers })).json()
+    expect(configured.session).toMatchObject({
+      model: expect.any(String),
+      mode: 'agent',
+      reasoning: null,
+      fastMode: false,
+      permMode: 'full',
+    })
+    await page.reload()
+    await page.getByRole('button', { name: 'Project chat', exact: true }).click()
+    await expect(page.getByRole('combobox', { name: 'Permission profile', exact: true })).toContainText('Full access')
+    await expect(page.getByRole('combobox', { name: 'Chat mode', exact: true })).toContainText('Agent')
+    await expect(page.getByRole('combobox', { name: 'Model', exact: true })).toContainText('secondary')
     await expect(page.getByRole('status').filter({ hasText: 'Ready to chat' })).toBeVisible()
     phase = 'plan'
     await send('Prepare a plan.')

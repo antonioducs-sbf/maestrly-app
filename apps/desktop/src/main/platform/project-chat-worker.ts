@@ -6,6 +6,7 @@ import {
   type ChatPayload,
   type ProjectChatClaim,
   type ProjectChatInteraction,
+  type ProjectChatSession,
 } from '@maestrly/protocol'
 import { inspectRepositories } from '@maestrly/runner-core'
 import { getWorkspace, getConversation, patchConvUiPrefs } from '../store'
@@ -24,6 +25,25 @@ import * as journal from './project-chat-store'
 
 export const chatWorkspaceKey = (b: PlatformProjectBinding) =>
   chatPublicId(b.connectionId + ':' + b.projectId + ':' + b.workspaceId)
+export function projectChatPreferences(
+  session: Pick<ProjectChatSession, 'mode' | 'reasoning' | 'fastMode' | 'permMode'>,
+  settings: DesktopExecutorSettings,
+  mcpServerIds: string[]
+) {
+  return {
+    mode: session.mode === 'chat' ? ('ask' as const) : session.mode,
+    permMode: session.permMode,
+    reasoning: session.reasoning ?? 'off',
+    fastMode: session.fastMode,
+    tools: {
+      app: settings.allowAppTools,
+      mcpDisabled: settings.allowMcp ? [] : mcpServerIds,
+      imageGen: false,
+    },
+    skillSelection: { kind: settings.skills ? ('all' as const) : ('none' as const) },
+    subagentsEnabled: true,
+  }
+}
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const terminalError = (e: unknown) => [401, 403, 404, 409].includes((e as { status?: number }).status ?? 0)
 export interface RemoteChatHost {
@@ -89,7 +109,20 @@ export class ProjectChatWorker {
       capability: CHAT_CAPABILITY,
       enabled: !!this.settings.interactiveChat,
       workspaces,
-      models: (await this.catalog.read()).models.map((m) => ({ id: m.model, label: m.label ?? m.model })),
+      models: await this.catalog.chatModels(),
+      conversationSettings: {
+        version: 1,
+        // Web project chat is either acting (agent) or read-only (ask); planning/design belong to the desktop.
+        modes: ['agent', 'ask'],
+        permissionModes: ['ask', 'auto', 'full'],
+        operatorLimits: {
+          commands: this.settings.allowCommands,
+          web: this.settings.allowWeb,
+          appTools: this.settings.allowAppTools,
+          mcp: this.settings.allowMcp,
+          push: this.settings.allowPush,
+        },
+      },
       integrations: { skills, memory, mcp: this.settings.allowMcp && listMcpServers().some((s) => s.enabled) },
     }
   }
@@ -173,21 +206,23 @@ export class ProjectChatWorker {
     const selection = await this.catalog.resolve(claim.session.model)
     if (!this.settings.providerIds.includes(selection.providerId))
       throw new Error('Provider is not enabled for this executor.')
+    if (claim.session.reasoning && !selection.reasoningEfforts.includes(claim.session.reasoning))
+      throw new Error('The selected reasoning effort is no longer available.')
+    if (claim.session.fastMode && !selection.fastMode) throw new Error('Fast mode is no longer available.')
     patchConvUiPrefs(id, {
-      chat: {
-        mode: claim.session.mode === 'chat' ? 'ask' : 'agent',
-        permMode: 'ask',
-        tools: {
-          app: this.settings.allowAppTools,
-          mcpDisabled: this.settings.allowMcp ? [] : listMcpServers().map((s) => s.id),
-          imageGen: false,
-        },
-        skillSelection: { kind: this.settings.skills ? 'all' : 'none' },
-        subagentsEnabled: true,
-      },
+      chat: projectChatPreferences(
+        claim.session,
+        this.settings,
+        listMcpServers().map((server) => server.id)
+      ),
     })
     const { primeChatTurnSelection } = await import('../chat/service')
-    primeChatTurnSelection(id, { providerId: selection.providerId, modelId: selection.modelId })
+    primeChatTurnSelection(id, {
+      providerId: selection.providerId,
+      modelId: selection.modelId,
+      reasoning: claim.session.reasoning ?? undefined,
+      fastMode: claim.session.fastMode,
+    })
     return id
   }
   async runOnce(): Promise<boolean> {
@@ -239,7 +274,13 @@ export class ProjectChatWorker {
     try {
       const conversationId = await this.prepare(claim),
         conv = getConversation(conversationId)!
-      const policy: RemoteChatPolicy = { ...this.settings, conversationId, cwd: conv.cwd, mode: session.mode }
+      const policy: RemoteChatPolicy = {
+        ...this.settings,
+        conversationId,
+        cwd: conv.cwd,
+        mode: session.mode === 'chat' ? 'ask' : session.mode,
+        permMode: session.permMode,
+      }
       releasePolicy = registerRemoteChatPolicy(policy)
       releaseContext = registerProjectChatContext(conversationId, {
         url: this.url,

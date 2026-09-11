@@ -1,6 +1,6 @@
 import { getGlobalMaestroConfig } from '../chat/maestro-config'
 import { createHash, randomUUID } from 'node:crypto'
-import type { RunnerAutomationCapabilities } from '@maestrly/protocol'
+import type { ChatInventory, RunnerAutomationCapabilities } from '@maestrly/protocol'
 import type { ExecutorAdapter, ExecutionContext, ExecutionHandle, ExecutionOutcome } from '@maestrly/runner-core'
 import { insertConversation } from '../store'
 import { broadcast } from '../window-ipc'
@@ -21,6 +21,7 @@ interface LocalModel {
   modelId: string
   reasoningEfforts: string[]
   fastMode: boolean
+  providerLabel: string
   label: string
 }
 const modelKey = (providerId: string, modelId: string) =>
@@ -88,6 +89,16 @@ export class DesktopModelCatalog {
     const model = this.models.get(key)
     if (!model) throw new Error('The selected desktop account or model is unavailable.')
     return model
+  }
+  async chatModels(): Promise<ChatInventory['models']> {
+    await this.read()
+    return [...this.models].map(([id, model]) => ({
+      id,
+      label: model.modelId,
+      providerLabel: model.providerLabel,
+      efforts: model.reasoningEfforts,
+      fastMode: model.fastMode,
+    }))
   }
 }
 function scrub(value: string): string {

@@ -2,7 +2,7 @@
 
 ## Interactive project chat
 
-The additive `chat:interactive:v1` capability identifies desktop executors that support persistent multi-turn chat. Project routes under `/api/v1/organizations/:organizationId/projects/:projectId/chat` expose owned sessions, messages, versioned interaction decisions and SSE replay. Runner routes under `/api/v1/runners/chat` publish inventory, claim turns, renew leases, fetch controls and acknowledge event batches. Chat tool tokens are bound to the requester, project, session, turn and lease. See [project chat](project-chat.md).
+The additive `chat:interactive:v1` capability identifies desktop executors that support persistent multi-turn chat. Project routes under `/api/v1/organizations/:organizationId/projects/:projectId/chat` expose owned sessions, messages, versioned settings/interaction decisions and SSE replay. Session settings include model, Agent/Ask mode, optional reasoning effort, Fast mode and Request approval/Approve for me/Full access profile. Settings updates require the current session version and are rejected while a turn is active. Runner routes under `/api/v1/runners/chat` publish model capabilities, supported settings and operator limits; claim turns; renew leases; fetch controls; and acknowledge event batches. Inventories without the settings capability retain the conservative legacy defaults. Chat tool tokens are bound to the requester, project, session, turn and lease. See [project chat](project-chat.md).
 
 The public REST API is rooted at `/api/v1`. `GET /api/v1/meta` and liveness/readiness endpoints are available before authentication. Other API calls send `X-Maestrly-Protocol-Version: 1.0`; incompatible clients receive `PROTOCOL_INCOMPATIBLE` without disabling local desktop features.
 

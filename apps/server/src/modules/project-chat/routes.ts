@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
-import { chatCreateSchema, chatDecisionSchema } from '@maestrly/protocol'
+import { chatCreateSchema, chatDecisionSchema, chatUpdateSchema } from '@maestrly/protocol'
 import type { DatabasePool } from '../../db/pool.js'
 import type { HumanIdentity } from '../auth/routes.js'
 import { executeIdempotent } from '../events/http-idempotency.js'
@@ -13,10 +13,10 @@ import {
   enqueueMessage,
   listSessions,
   mapMessage,
-  mapSession,
   mapTurn,
   ownedSession,
   snapshot,
+  updateSession,
   type ChatScope,
 } from './service.js'
 import { appendChatEvent, listChatEvents } from './events.js'
@@ -78,38 +78,8 @@ export function registerProjectChatRoutes(app: FastifyInstance, pool: DatabasePo
   })
   app.patch(root + '/sessions/:sessionId', async (r) => {
     const s = await scope(r, true),
-      body = z
-        .object({
-          expectedVersion: z.number().int().positive(),
-          title: z.string().trim().min(1).max(160).optional(),
-          archived: z.boolean().optional(),
-        })
-        .strict()
-        .parse(r.body)
-    return chatTransaction(pool, s, true, async (c) => {
-      const session = await ownedSession(c, s, s.sessionId!, true)
-      return mutate(r, s, body, async () => {
-        if (session.version !== body.expectedVersion) chatFail('Conversation changed. Reload before saving.')
-        if (
-          body.archived &&
-          (
-            await c.query(
-              "select id from chat_turns where session_id=$1 and state in ('queued','running','waiting_input','cancelling')",
-              [session.id]
-            )
-          ).rowCount
-        )
-          chatFail('Stop the active turn before archiving.')
-        return mapSession(
-          (
-            await c.query(
-              'update chat_sessions set title=coalesce($2,title),archived_at=case when $3::boolean is null then archived_at when $3 then now() else null end,version=version+1,updated_at=now() where id=$1 returning *',
-              [session.id, body.title ?? null, body.archived ?? null]
-            )
-          ).rows[0]
-        )
-      })
-    })
+      body = chatUpdateSchema.parse(r.body)
+    return mutate(r, s, body, () => chatTransaction(pool, s, true, (c) => updateSession(c, s, s.sessionId!, body)))
   })
   app.get(root + '/sessions/:sessionId/messages', async (r) => {
     const s = await scope(r),

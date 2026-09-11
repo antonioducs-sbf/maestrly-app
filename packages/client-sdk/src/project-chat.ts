@@ -2,6 +2,7 @@ import {
   projectChatEventSchema,
   type ChatCreate,
   type ChatDecision,
+  type ChatUpdate,
   type ProjectChatEvent,
   type ProjectChatSnapshot,
   type ProjectChatSession,
@@ -85,6 +86,12 @@ export class ProjectChatClient {
   }
   create(body: ChatCreate, key: string) {
     return this.transport.request<ProjectChatSession>('POST', this.path + '/sessions', { body, idempotencyKey: key })
+  }
+  update(id: string, body: ChatUpdate, key: string) {
+    return this.transport.request<ProjectChatSession>('PATCH', this.path + '/sessions/' + encodeURIComponent(id), {
+      body,
+      idempotencyKey: key,
+    })
   }
   snapshot(id: string) {
     return this.transport.request<ProjectChatSnapshot>('GET', this.path + '/sessions/' + encodeURIComponent(id))

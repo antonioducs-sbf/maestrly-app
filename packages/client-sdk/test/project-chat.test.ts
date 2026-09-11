@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { HttpTransport } from '../src/transport.js'
-import { applyProjectChatEvent, readProjectChatEvents } from '../src/project-chat.js'
+import { applyProjectChatEvent, ProjectChatClient, readProjectChatEvents } from '../src/project-chat.js'
 import type { ProjectChatSnapshot, ProjectChatEvent } from '@maestrly/protocol'
 it('binds the browser fetch receiver when using the default transport', async () => {
   vi.stubGlobal('fetch', function(this:unknown) { expect(this).toBe(globalThis); return Promise.resolve(new Response('{"ok":true}')) })
@@ -48,4 +48,23 @@ it('decodes UTF-8 split across network chunks and CRLF SSE frames', async () => 
   const received = []
   for await (const value of readProjectChatEvents(new Response(stream))) received.push(value)
   expect(received).toEqual([event])
+})
+
+it('updates all conversation settings atomically with optimistic versioning', async () => {
+  const request = vi.fn(async () => ({ id: 'session' }))
+  const chat = new ProjectChatClient({ request } as never, 'organization', 'project')
+  const body = {
+    expectedVersion: 4,
+    model: 'codex-work',
+    mode: 'design' as const,
+    reasoning: 'high',
+    fastMode: true,
+    permMode: 'full' as const,
+  }
+  await chat.update('session', body, 'settings-4')
+  expect(request).toHaveBeenCalledWith(
+    'PATCH',
+    '/api/v1/organizations/organization/projects/project/chat/sessions/session',
+    { body, idempotencyKey: 'settings-4' }
+  )
 })

@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import {
   chatInventorySchema,
+  chatUpdateSchema,
   projectChatSessionSchema,
   projectChatMessageSchema,
   projectChatTurnSchema,
   projectChatInteractionSchema,
   type ChatCreate,
+  type ChatInventory,
+  type ChatUpdate,
+  type ProjectChatSettings,
   type ProjectChatSession,
   type ProjectChatSnapshot,
   type ProjectChatDestination,
@@ -74,7 +78,31 @@ export async function ownedSession(c: DatabaseClient, s: ChatScope, id: string, 
   if (!r.rows[0]) chatFail('Conversation not found.', 404)
   return mapSession(r.rows[0])
 }
-export async function eligibleDestination(c: DatabaseClient, s: ChatScope, input: ChatCreate) {
+function normalizedMode(mode: ProjectChatSettings['mode']) {
+  return mode === 'chat' ? 'ask' : mode
+}
+export function validateChatSettings(inventory: ChatInventory, input: ProjectChatSettings) {
+  const model = inventory.models.find((candidate) => candidate.id === input.model)
+  if (!model) chatFail('The selected model is unavailable.')
+  const controls = inventory.conversationSettings
+  if (!controls) {
+    if (
+      !['chat', 'agent'].includes(input.mode) ||
+      input.reasoning !== null ||
+      input.fastMode ||
+      input.permMode !== 'ask'
+    )
+      chatFail('This executor does not support configurable chat settings.')
+    return model
+  }
+  if (!controls.modes.includes(normalizedMode(input.mode))) chatFail('The selected chat mode is unavailable.')
+  if (!controls.permissionModes.includes(input.permMode)) chatFail('The selected permission mode is unavailable.')
+  if (input.reasoning !== null && !model.efforts.includes(input.reasoning))
+    chatFail('The selected reasoning effort is unavailable for this model.')
+  if (input.fastMode && !model.fastMode) chatFail('Fast mode is unavailable for this model.')
+  return model
+}
+export async function eligibleDestination(c: DatabaseClient, s: ChatScope, input: ChatCreate | ProjectChatSession) {
   const rows = await c.query(
     `select r.* from runners r join runner_project_bindings b on b.runner_id=r.id and b.organization_id=r.organization_id
     where r.id=$1 and r.organization_id=$2 and b.project_id=$3 and r.status<>'revoked'
@@ -84,8 +112,8 @@ export async function eligibleDestination(c: DatabaseClient, s: ChatScope, input
   const parsed = chatInventorySchema.safeParse(rows.rows[0]?.chat_capabilities)
   if (!parsed.success || !parsed.data.enabled) chatFail('This executor does not support interactive chat.', 409)
   const inv = parsed.data
+  validateChatSettings(inv, input)
   if (
-    !inv.models.some((m) => m.id === input.model) ||
     !inv.workspaces.some(
       (w) => w.projectId === s.projectId && w.key === input.workspaceKey && w.branches.includes(input.baseBranch)
     )
@@ -122,6 +150,12 @@ export async function destinations(pool: DatabasePool, scope: ChatScope): Promis
   })
 }
 export async function createSession(pool: DatabasePool, s: ChatScope, input: ChatCreate) {
+  input = {
+    ...input,
+    reasoning: input.reasoning ?? null,
+    fastMode: input.fastMode === true,
+    permMode: input.permMode ?? 'ask',
+  }
   return chatTransaction(pool, s, true, async (c) => {
     await eligibleDestination(c, s, input)
     if (
@@ -145,8 +179,8 @@ export async function createSession(pool: DatabasePool, s: ChatScope, input: Cha
       input = { ...input, boardId: card.board_id }
     }
     const r = await c.query(
-      `insert into chat_sessions(organization_id,project_id,owner_user_id,runner_id,workspace_key,title,model,mode,base_branch,board_id,card_id)
-      values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
+      `insert into chat_sessions(organization_id,project_id,owner_user_id,runner_id,workspace_key,title,model,mode,reasoning,fast_mode,perm_mode,base_branch,board_id,card_id)
+      values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) returning *`,
       [
         s.organizationId,
         s.projectId,
@@ -156,6 +190,9 @@ export async function createSession(pool: DatabasePool, s: ChatScope, input: Cha
         input.title,
         input.model,
         input.mode,
+        input.reasoning,
+        input.fastMode,
+        input.permMode,
         input.baseBranch,
         input.boardId,
         input.cardId,
@@ -163,6 +200,55 @@ export async function createSession(pool: DatabasePool, s: ChatScope, input: Cha
     )
     return mapSession(r.rows[0])
   })
+}
+export async function updateSession(c: DatabaseClient, s: ChatScope, id: string, raw: ChatUpdate) {
+  const input = chatUpdateSchema.parse(raw)
+  const session = await ownedSession(c, s, id, true)
+  if (session.version !== input.expectedVersion) chatFail('Conversation changed. Reload before saving.')
+  const settingsChanged = ['model', 'mode', 'reasoning', 'fastMode', 'permMode'].some((key) =>
+    Object.hasOwn(input, key)
+  )
+  const active =
+    settingsChanged || input.archived
+      ? await c.query(
+          "select id from chat_turns where session_id=$1 and state in ('queued','running','waiting_input','cancelling')",
+          [session.id]
+        )
+      : null
+  if (active?.rowCount)
+    chatFail(
+      input.archived ? 'Stop the active turn before archiving.' : 'Stop the active turn before changing chat settings.'
+    )
+  const next: ProjectChatSettings = {
+    model: input.model ?? session.model,
+    mode: input.mode ?? session.mode,
+    reasoning: input.reasoning === undefined ? session.reasoning : input.reasoning,
+    fastMode: input.fastMode ?? session.fastMode,
+    permMode: input.permMode ?? session.permMode,
+  }
+  if (settingsChanged) {
+    await eligibleDestination(c, s, { ...session, ...next })
+  }
+  return mapSession(
+    (
+      await c.query(
+        `update chat_sessions set title=coalesce($2,title),
+          archived_at=case when $3::boolean is null then archived_at when $3 then now() else null end,
+          model=$4,mode=$5,reasoning=$6,fast_mode=$7,perm_mode=$8,version=version+1,updated_at=now()
+        where id=$1 returning *`,
+        [
+          session.id,
+          input.title ?? null,
+          input.archived ?? null,
+          next.model,
+          next.mode,
+          next.reasoning,
+          next.fastMode,
+          next.permMode,
+        ]
+      )
+    ).rows[0]
+  )
 }
 export async function listSessions(pool: DatabasePool, s: ChatScope, before = '') {
   return chatTransaction(pool, s, false, async (c) => {
